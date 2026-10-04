@@ -38,13 +38,14 @@ process.on('message', async (msg) => {
       interactionMode: run.autonomy === 'off' ? 'spec' : 'auto',
       autonomyLevel: run.autonomy,
       ...(run.model ? { modelId: run.model } : {}),
-      ...(config.reasoningEffort ? { reasoningEffort: config.reasoningEffort } : {}),
+      ...(run.reasoningEffort ? { reasoningEffort: run.reasoningEffort } : {}),
     };
     const options = {
       transport, abortSignal: abort.signal, disableBuiltinSkills: true,
       permissionHandler(params) {
-        void event({ type: 'permission_declined', details: JSON.stringify(params).slice(0, 4000) }).catch(() => {});
-        return ToolConfirmationOutcome.Cancel;
+        const proceed = run.autonomy === 'high' && params.options.some((option) => option.value === ToolConfirmationOutcome.ProceedOnce);
+        void event({ type: proceed ? 'permission_approved_once' : 'permission_declined', details: JSON.stringify(params).slice(0, 4000) }).catch(() => {});
+        return proceed ? ToolConfirmationOutcome.ProceedOnce : ToolConfirmationOutcome.Cancel;
       },
       askUserHandler(params) {
         void event({ type: 'ask_user_declined', details: JSON.stringify(params).slice(0, 4000) }).catch(() => {});

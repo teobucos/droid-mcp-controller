@@ -50,14 +50,19 @@ Edit `config.json` locally. Use actual absolute paths, e.g. `/home/alice/...` or
 
 Keep `off` for read-only evaluation. If the user authorizes edits/commands,
 explicitly change the host ceiling to `low`, `medium`, or `high`. A tool request
-cannot exceed that ceiling. Every start/continue must independently request a
-non-off level; omission resets the next turn to read-only. Inspect project hooks
+cannot exceed that ceiling. New turns default to `defaultAutonomy`, which is
+`off` unless configured. For authorized full Auto execution, set both
+`defaultAutonomy` and `maxAutonomy` to `high`; callers can still explicitly use
+`autonomy:"off"` for read-only work. Inspect project hooks
 and existing Factory MCP configuration first. Approved cwd is not an OS sandbox;
 use a restricted user/container if hard directory containment is required.
 
 If an explicit reasoning level is required, add `reasoningEffort` supported by
 the chosen Factory model. It is independent of autonomy and applies on start
-and resume. Tool discovery shows the loaded approvals, ceiling, and reasoning.
+and resume; the optional per-turn field overrides it. High autonomy approves
+offered single-use permissions, not persistent rules; questions still interrupt
+instead of guessing answers. Tool discovery shows approvals, default, ceiling,
+and reasoning.
 Configuration edits require a coordinated restart when no runs are active.
 
 ## 3. Verify real authentication and durable continuation locally

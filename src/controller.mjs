@@ -115,15 +115,17 @@ export class Controller {
   }
   accept(args, source) {
     const workspace = approvedWorkspace(this.config, args.workspace);
-    const autonomy = args.autonomy ?? 'off';
-    if (levels.indexOf(autonomy) > levels.indexOf(this.config.maxAutonomy)) throw new Error('Requested autonomy exceeds configured maxAutonomy');
-    const intent = { workspace, prompt: args.prompt, autonomy, model: args.model ?? null, parentRunId: source?.runId ?? null };
-    const fingerprint = createHash('sha256').update(JSON.stringify(intent)).digest('hex');
     const duplicate = Object.values(this.state.runs).find((run) => run.requestKey === args.requestKey);
+    // Replays retain their accepted defaults, including records predating per-turn reasoning.
+    const autonomy = args.autonomy ?? (duplicate ? duplicate.autonomy : this.config.defaultAutonomy);
+    const reasoningEffort = args.reasoningEffort ?? (duplicate ? duplicate.reasoningEffort : this.config.reasoningEffort);
+    const intent = { workspace, prompt: args.prompt, autonomy, model: args.model ?? null, parentRunId: source?.runId ?? null, ...(reasoningEffort ? { reasoningEffort } : {}) };
     if (duplicate) {
-      if (duplicate.fingerprint !== fingerprint) throw new Error('requestKey was already used with different arguments');
+      if (Object.keys(intent).some((key) => (duplicate[key] ?? null) !== (intent[key] ?? null))) throw new Error('requestKey was already used with different arguments');
       return this.status(duplicate.runId);
     }
+    if (levels.indexOf(autonomy) > levels.indexOf(this.config.maxAutonomy)) throw new Error('Requested autonomy exceeds configured maxAutonomy');
+    const fingerprint = createHash('sha256').update(JSON.stringify(intent)).digest('hex');
     if (this.stopping) throw new Error('Controller is shutting down');
     if (source) {
       const family = Object.values(this.state.runs).filter((r) => r.droidSessionId === source.droidSessionId);
@@ -133,7 +135,6 @@ export class Controller {
     if (this.workers.size >= this.config.maxConcurrentRuns) throw new Error('Controller busy: maxConcurrentRuns reached');
     const run = {
       ...intent, runId: randomUUID(), requestKey: args.requestKey, fingerprint,
-      ...(this.config.reasoningEffort ? { reasoningEffort: this.config.reasoningEffort } : {}),
       droidSessionId: source?.droidSessionId ?? null, state: 'starting', createdAt: now(),
       updatedAt: now(), events: [], textTail: '', stderrTail: '', cancelRequested: false,
     };

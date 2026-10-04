@@ -9,6 +9,11 @@ against a mock `droid exec` executable. It must distinguish these failures:
   invalid launches; status loses the explicit host reasoning setting on restart.
 - Two continuations overlap or reuse a different session UUID. Settings inherited
   from a saved session silently override requested autonomy/model.
+- Per-turn reasoning is ignored on start/resume; changing it reuses a key;
+  changing host defaults after restart breaks replay of an accepted legacy key.
+- An explicitly configured high default remains Spec/off or cannot approve an
+  offered single-use permission; an explicit off override inherits high instead.
+  High silently creates persistent permission rules or invents unavailable options.
 - Idle, text, silence, malformed JSON, unrelated turn completion, process exit,
   or a timeout is mistaken for a successful terminal result.
 - Permission/AskUser requests hang or are approved without authorization; spec

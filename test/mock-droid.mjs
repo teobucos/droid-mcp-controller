@@ -49,8 +49,8 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (prompt === 'malformed') { process.stdout.write('{invalid json\n'); return; }
       if (prompt === 'silent') return;
       if (prompt === 'wrong-turn') { terminal('completed', randomUUID()); return; }
-      if (prompt === 'permission') {
-        send({ ...envelope('request'), id: 'permission-1', method: 'droid.request_permission', params: { toolUses: [], options: [{ label: 'Cancel', value: 'cancel' }] } }); return;
+      if (prompt === 'permission' || prompt === 'permission-once') {
+        send({ ...envelope('request'), id: 'permission-1', method: 'droid.request_permission', params: { toolUses: [], options: [...(prompt === 'permission-once' ? [{ label: 'Proceed once', value: 'proceed_once' }] : []), { label: 'Cancel', value: 'cancel' }] } }); return;
       }
       if (prompt === 'ask') {
         send({ ...envelope('request'), id: 'ask-1', method: 'droid.ask_user', params: { toolCallId: 'ask-tool', questions: [{ index: 1, topic: 'Deploy', question: 'Deploy?', options: ['yes', 'no'] }] } }); return;
@@ -73,8 +73,10 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       reply(req, {}); break;
     default:
       if (req.id === 'permission-1') {
-        if (req.result.selectedOption !== 'cancel') process.exit(12);
-        terminal('permission_rejected');
+        if (req.result.selectedOption === 'proceed_once' && prompt === 'permission-once') {
+          text('single-use permission approved'); terminal('completed');
+        } else if (req.result.selectedOption === 'cancel') terminal('permission_rejected');
+        else process.exit(12);
       } else if (req.id === 'ask-1') {
         if (!req.result.cancelled) process.exit(13);
         terminal('cancelled');

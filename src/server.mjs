@@ -4,17 +4,21 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { z } from 'zod';
-import { loadConfig, autonomy } from './config.mjs';
+import { loadConfig, autonomy, reasoning } from './config.mjs';
 import { Controller } from './controller.mjs';
 
 const runId = z.string().uuid().describe('Controller run UUID, not Droid session UUID');
 const requestKey = z.string().min(1).max(200).describe('Stable idempotency key; reuse only with exactly the same arguments');
 const prompt = z.string().min(1).max(100000);
-const options = { autonomy: autonomy.optional().describe('Defaults to off/read-only EVERY turn; bounded by configured maxAutonomy'), model: z.string().min(1).max(200).optional().describe('Explicit Factory model ID for this turn, including continuation; choose explicitly to control cost') };
+const options = {
+  autonomy: autonomy.optional().describe('Uses host default EVERY new turn; off is read-only, high is full Auto execution. Bounded by maxAutonomy'),
+  model: z.string().min(1).max(200).optional().describe('Explicit Factory model ID for this turn, including continuation; choose explicitly to control cost'),
+  reasoningEffort: reasoning.optional().describe('Independent of autonomy; overrides host reasoning for this turn. Must be supported by the chosen Factory model'),
+};
 
 function createMcp(controller) {
   const server = new McpServer({ name: 'droid-controller', version: '0.1.0' });
-  const policy = `Approved workspace roots: ${JSON.stringify(controller.config.approvedDirectories)}. Autonomy ceiling: ${controller.config.maxAutonomy}. Host reasoning effort: ${controller.config.reasoningEffort ?? 'Droid default'}.`;
+  const policy = `Approved workspace roots: ${JSON.stringify(controller.config.approvedDirectories)}. Autonomy ceiling: ${controller.config.maxAutonomy}. Default autonomy: ${controller.config.defaultAutonomy}. Host reasoning effort: ${controller.config.reasoningEffort ?? 'Droid default'}.`;
   const register = (name, description, inputSchema, handler, readOnlyHint = false) => {
     server.registerTool(name, { description, inputSchema, annotations: { readOnlyHint, destructiveHint: !readOnlyHint, openWorldHint: !readOnlyHint } }, async (args) => {
       try {

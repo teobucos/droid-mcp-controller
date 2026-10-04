@@ -3,6 +3,7 @@ import { isAbsolute, relative, sep } from 'node:path';
 import { z } from 'zod';
 
 export const autonomy = z.enum(['off', 'low', 'medium', 'high']);
+export const reasoning = z.enum(['off', 'none', 'dynamic', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 const absolute = z.string().refine(isAbsolute, 'Use an absolute path (expand ~ yourself)');
 const schema = z.object({
   approvedDirectories: z.array(absolute).min(1),
@@ -13,11 +14,12 @@ const schema = z.object({
   tokenFile: absolute.optional(),
   publicUrl: z.string().url().optional(),
   maxAutonomy: autonomy.default('off'),
-  reasoningEffort: z.enum(['off', 'none', 'low', 'medium', 'high', 'xhigh', 'max']).optional(),
+  defaultAutonomy: autonomy.default('off'),
+  reasoningEffort: reasoning.optional(),
   maxConcurrentRuns: z.number().int().min(1).max(16).default(4),
   runTimeoutMs: z.number().int().min(1000).max(86400000).default(3600000),
   cancelGraceMs: z.number().int().min(100).max(30000).default(5000),
-}).strict();
+}).strict().refine((config) => autonomy.options.indexOf(config.defaultAutonomy) <= autonomy.options.indexOf(config.maxAutonomy), 'defaultAutonomy cannot exceed maxAutonomy');
 
 export function loadConfig(path) {
   if (!['linux', 'darwin'].includes(process.platform)) throw new Error('Linux or macOS required for process-group cleanup');

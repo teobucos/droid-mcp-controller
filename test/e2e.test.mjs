@@ -116,6 +116,40 @@ test('Puck MCP lifecycle, protocol, persistence and security E2E', async (t) => 
     assert.equal((await call('droid_status', { runId: h.first.runId })).reasoningEffort, 'high');
   });
 
+  await t.test('per-turn reasoning overrides host defaults on start and resume', async () => {
+    const first = await start('reasoning-start', 'reasoning', { reasoningEffort: 'low', model: 'model-a' });
+    await finish(first.runId);
+    assert.equal(first.reasoningEffort, 'low');
+    assert.equal(audit().filter((x) => x.method === 'droid.initialize_session').at(-1).params.reasoningEffort, 'low');
+    await assert.rejects(start('reasoning-start', 'reasoning', { reasoningEffort: 'high', model: 'model-a' }), /different/i);
+    const resumed = await call('droid_continue', { runId: first.runId, requestKey: 'reasoning-resume', prompt: 'next', reasoningEffort: 'medium', model: 'model-b' });
+    await finish(resumed.runId);
+    assert.equal(resumed.reasoningEffort, 'medium');
+    const settings = audit().filter((x) => x.method === 'droid.update_session_settings').at(-1).params;
+    assert.equal(settings.reasoningEffort, 'medium');
+    assert.equal(settings.modelId, 'model-b');
+    assert.equal(settings.autonomyLevel, 'off');
+  });
+
+  await t.test('configured high default approves only offered single-use permissions; off overrides it', async () => {
+    const separate = await boot({ defaultAutonomy: 'high' });
+    try {
+      const args = { requestKey: 'high-default', prompt: 'permission-once', workspace: join(separate.dir, 'workspace') };
+      const first = await call('droid_start', args, separate);
+      assert.equal((await finish(first.runId, separate)).state, 'succeeded');
+      assert.equal(first.autonomy, 'high');
+      const wire = audit(separate);
+      assert.equal(wire.find((x) => x.method === 'droid.initialize_session').params.interactionMode, 'auto');
+      assert.equal(wire.find((x) => x.id === 'permission-1' && x.type === 'response').result.selectedOption, 'proceed_once');
+      for (const autonomy of ['off', 'medium']) {
+        const run = await call('droid_start', { ...args, requestKey: `override-${autonomy}`, autonomy }, separate);
+        assert.equal((await finish(run.runId, separate)).state, 'interrupted');
+      }
+      const tools = (await separate.client.listTools()).tools;
+      assert.ok(tools.find((x) => x.name === 'droid_start').description.includes('Default autonomy: high'));
+    } finally { await stop(separate); rmSync(separate.dir, { recursive: true, force: true }); }
+  });
+
   await t.test('tool-only assistant messages preserve events without corrupting progress text', async () => {
     const done = await finish((await start('textless', 'textless-assistant')).runId);
     assert.equal(done.state, 'succeeded');
@@ -134,8 +168,8 @@ test('Puck MCP lifecycle, protocol, persistence and security E2E', async (t) => 
     const done = await finish(next.runId);
     assert.equal(done.state, 'succeeded');
     const wire = audit();
-    assert.equal(wire.find((x) => x.method === 'droid.load_session').params.sessionId, h.first.droidSessionId);
-    const settings = wire.find((x) => x.method === 'droid.update_session_settings');
+    assert.equal(wire.filter((x) => x.method === 'droid.load_session').at(-1).params.sessionId, h.first.droidSessionId);
+    const settings = wire.filter((x) => x.method === 'droid.update_session_settings').at(-1);
     assert.equal(settings.params.autonomyLevel, 'low');
     assert.equal(settings.params.interactionMode, 'auto');
     assert.equal(settings.params.modelId, 'chosen-model');
@@ -206,17 +240,21 @@ test('Puck MCP lifecycle, protocol, persistence and security E2E', async (t) => 
     assert.match(log, /already.*running|locked/i);
     const old = h;
     await stop(old);
-    h = await boot({}, {}, old.dir);
+    h = await boot({ defaultAutonomy: 'high', reasoningEffort: 'low' }, {}, old.dir);
     h.first = old.first; h.next = old.next;
     assert.equal((await start('start-one', 'slow')).runId, h.first.runId);
+    assert.equal((await start('start-one', 'slow')).autonomy, 'off');
+    assert.equal((await start('start-one', 'slow')).reasoningEffort, 'high');
+    await assert.rejects(start('start-one', 'slow', { reasoningEffort: 'low' }), /different/i);
     assert.equal((await call('droid_result', { runId: h.next.runId })).text, 'answer:follow-up');
     assert.equal((await call('droid_status', { runId: h.next.runId })).reasoningEffort, 'high');
     assert.equal(statSync(join(h.dir, 'state/state.json')).mode & 0o777, 0o600);
     const again = await call('droid_continue', { runId: h.next.runId, requestKey: 'after-restart', prompt: 'remember' });
     assert.equal((await finish(again.runId)).droidSessionId, h.first.droidSessionId);
     const reset = audit().filter((x) => x.method === 'droid.update_session_settings').at(-1);
-    assert.equal(reset.params.autonomyLevel, 'off');
-    assert.equal(reset.params.interactionMode, 'spec');
+    assert.equal(reset.params.autonomyLevel, 'high');
+    assert.equal(reset.params.interactionMode, 'auto');
+    assert.equal(reset.params.reasoningEffort, 'low');
     assert.ok((await call('droid_list', {})).runs.length >= 8);
   });
 

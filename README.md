@@ -30,10 +30,12 @@ node src/server.mjs --config /absolute/path/to/config.json
 | `droid_cancel` | `runId` | Interrupt; poll until terminal. Never undoes edits. |
 
 Start/continue also accept `autonomy: "off" | "low" | "medium" | "high"` and
-optional `model`. **Each turn defaults to off**, including continuation of a
-previously high-autonomy session. The host's `maxAutonomy` ceiling can only be
-changed in its local configuration. `off` sets Spec mode plus autonomy off;
-the others set Auto mode plus the requested level through JSON-RPC.
+optional `model` and `reasoningEffort`. Every new turn uses the host's
+`defaultAutonomy` (off unless explicitly configured), including continuation.
+The host's `maxAutonomy` ceiling can only be changed in its local configuration.
+`off` sets Spec mode plus autonomy off; the others set Auto mode plus the
+requested level through JSON-RPC. For authorized full Auto execution, configure
+both `defaultAutonomy` and `maxAutonomy` to `high`. This does not grant OS privileges.
 
 Tool discovery includes the host's approved workspace roots, autonomy ceiling,
 and reasoning setting. Choose a workspace from those roots rather than guessing
@@ -41,10 +43,11 @@ a repository path. Send an explicit enabled `model` on **every** start/continue
 to avoid inheriting a costly default. Model IDs and pricing come from Factory's
 current account catalog, not from this controller.
 
-Reasoning is a separate host setting: `reasoningEffort` is applied on both start
-and resume, independent of autonomy. Explicit host reasoning is saved on each
-new run and returned by status/result/list. Older records may lack that field;
-they are not rewritten. Omission leaves Droid's default/saved reasoning in place.
+Reasoning is independent of autonomy. Per-turn `reasoningEffort` overrides the
+host setting on both start and resume. The effective explicit value is saved
+and returned by status/result/list. Older records may lack that field; they
+are not rewritten. Without a turn or host value, Droid uses default/saved reasoning.
+Use only reasoning levels supported by the selected Factory model.
 
 `droid_result` accepts `offset` (default 0) and `limit` (default 12000, max 16000)
 in JavaScript string characters. Follow `nextOffset` until null. It returns the
@@ -54,7 +57,7 @@ supports offset/limit (default 25, max 100).
 Typical Puck sequence (tool arguments, not shell commands):
 
 ```json
-{"requestKey":"review-42","workspace":"/approved/project","model":"YOUR_ENABLED_MODEL_ID","autonomy":"off","prompt":"Review the changes; do not edit files."}
+{"requestKey":"review-42","workspace":"/approved/project","model":"YOUR_ENABLED_MODEL_ID","reasoningEffort":"high","autonomy":"off","prompt":"Review the changes; do not edit files."}
 ```
 
 1. Call `droid_start` with those arguments. Retain `runId` and `requestKey`.
@@ -74,6 +77,8 @@ Typical Puck sequence (tool arguments, not shell commands):
 Keys are global to this controller state directory. Retrying exactly the same
 start/continue arguments returns the existing run, even after restart. Reusing
 a key for different arguments fails. Use a new key for intentional new work.
+Omitted autonomy/reasoning on a replay use the originally accepted values, not
+changed host defaults. Explicit changed reasoning conflicts with the key.
 An accepted intent is synced to disk before spawning the worker. This provides
 at-most-one controller launch per key, **not exactly-once Droid side effects**.
 
@@ -116,10 +121,12 @@ history and the workspace locally. Start a fresh controller task with a new key
 after reconciliation, or use the saved UUID manually outside the controller.
 Do not edit state to manufacture success.
 
-Pending permission requests are recorded and declined with `Cancel`, never
-`ProceedAlways`. AskUser questions are recorded and declined, not guessed. Puck
-can inspect the context and send a new prompt after interruption. This version
-does not offer an interactive permission queue or arbitrary session import.
+High-autonomy turns record and approve offered single-use permissions with
+`ProceedOnce`, never persistent `ProceedAlways` rules. Other levels decline
+pending permission requests with `Cancel`; high also declines if no single-use
+option is offered. AskUser questions are recorded and declined, not guessed.
+Puck can inspect the context and send a new prompt after interruption. There is
+no interactive permission queue or arbitrary session import.
 
 ## Same-host durability and cleanup
 
@@ -159,7 +166,8 @@ Optional settings:
 | --- | --- |
 | `transport` | `stdio` (no network listener) |
 | `maxAutonomy` | `off` |
-| `reasoningEffort` | Unset; otherwise `off`, `none`, `low`, `medium`, `high`, `xhigh`, or `max`, supported by the selected Factory model |
+| `defaultAutonomy` | `off`; cannot exceed `maxAutonomy` |
+| `reasoningEffort` | Unset; otherwise `off`, `none`, `dynamic`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, supported by the selected Factory model |
 | `maxConcurrentRuns` | 4 across distinct sessions |
 | `runTimeoutMs` | 3600000 (one hour wall clock, including setup) |
 | `cancelGraceMs` | 5000, also bounds terminal cleanup |
@@ -196,8 +204,12 @@ restarting the server; update Amp's stored credential separately.
   and resume-cwd checks still apply. Configuration is loaded at process startup;
   coordinate a controller-only restart with every caller to activate changes.
 - **HTTP 530:** a failure at the HTTPS/Cloudflare boundary; it does not establish
-  that Droid failed or stopped. Check the connector's private loopback readiness,
-  connection count, DNS, and bounded logs. A controller restart cannot repair an
+  that Droid failed or stopped. Check the actual public route and Cloudflare's
+  tunnel connection state, DNS, and bounded logs. Loopback readiness/metrics can
+  appear healthy while public routing is down. Synthetic host DNS can also make
+  a local HTTPS probe misleading; cloud-client acceptance is required. Reserve
+  connector-only recovery when public routing fails; preserve active Droid runs.
+  A controller restart cannot repair an
   unavailable tunnel. Retry read-only status/list/result after a short delay;
   replay start/continue only with the **same key and identical arguments** when
   acceptance is uncertain. Never create a second intent merely because HTTP failed.
