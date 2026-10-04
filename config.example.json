@@ -1,0 +1,7 @@
+{
+  "approvedDirectories": ["/absolute/path/to/approved/project"],
+  "stateDirectory": "/absolute/path/to/private/droid-controller-state",
+  "droidPath": "/absolute/path/to/home/.local/bin/droid",
+  "transport": "stdio",
+  "maxAutonomy": "off"
+}

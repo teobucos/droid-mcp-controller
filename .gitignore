@@ -1,0 +1,12 @@
+node_modules/
+config.json
+state/
+*.tgz
+/.amp/in/
+.env
+.env.*
+*.pem
+*.key
+*.log
+*.bundle
+*.tar.gz
