@@ -10,3 +10,4 @@ state/
 *.log
 *.bundle
 *.tar.gz
+/.factory/mcp.json

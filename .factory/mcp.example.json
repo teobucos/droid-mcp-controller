@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "amp-puck": {
+      "type": "http",
+      "url": "https://ampcode.com/mcp?profile=external-agent",
+      "oauth": { "resource": "https://ampcode.com/mcp" },
+      "disabledTools": ["manage_amp"]
+    }
+  }
+}
