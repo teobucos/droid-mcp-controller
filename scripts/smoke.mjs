@@ -1,4 +1,5 @@
-// Repeatable verification on the authenticated user host, through real MCP.
+// Repeatable verification on the authenticated user host, through real MCP, using
+// the session tools: create, wait, read, send (resume), wait, usage.
 import { parseArgs } from 'node:util';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -8,29 +9,34 @@ import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
 const { values } = parseArgs({ options: { config: { type: 'string' }, out: { type: 'string' }, url: { type: 'string' }, model: { type: 'string' }, 'expect-auth-failure': { type: 'boolean', default: false } } });
-if (!values.config || !values.out) throw new Error('Usage: npm run smoke -- --config /absolute/config.json --out /absolute/evidence.json [--url https://host/mcp] [--model model-id] [--expect-auth-failure]');
+if (!values.config || !values.out) throw new Error('Usage: npm run smoke -- --config /absolute/config.json --out /absolute/evidence.json --model model-id [--url https://host/mcp] [--expect-auth-failure]');
+if (!values.model) throw new Error('--model is required: pick an id from droid_models');
 const config = JSON.parse(readFileSync(values.config, 'utf8'));
-const client = new Client({ name: 'droid-controller-smoke', version: '0.1.0' });
+const client = new Client({ name: 'droid-controller-smoke', version: '0.2.0' });
 const report = { at: new Date().toISOString(), node: process.version, model: values.model, passed: false, runs: [] };
-let current;
+let session;
 async function call(name, args) {
   const response = await client.callTool({ name, arguments: args });
   const data = JSON.parse(response.content[0].text);
-  if (response.isError) throw new Error(`${name}: ${data.error}`);
+  if (response.isError) throw new Error(`${name}: ${data.error.code}: ${data.error.message}`);
   return data;
 }
-async function terminal(id) {
+async function settled(id) {
   const deadline = Date.now() + 120000;
   while (Date.now() < deadline) {
-    const status = await call('droid_status', { runId: id });
-    if (status.terminal) return call('droid_result', { runId: id });
-    await new Promise((r) => setTimeout(r, 500));
+    const { sessions, settled: done } = await call('droid_wait_for_sessions', { sessions: [id], timeoutSeconds: 20 });
+    if (done) return sessions[0];
   }
   throw new Error('Smoke turn did not finish within two minutes');
 }
-function record(result, marker) {
+async function record(status, marker) {
   // Do not export arbitrary assistant output, stderr, prompts, or credentials.
-  const entry = { runId: result.runId, droidSessionId: result.droidSessionId, state: result.state, subtype: result.outcome?.subtype, resultAvailable: result.resultAvailable, markerMatched: result.text.trim() === marker, authFailureObserved: /authenticat|access token|log in/i.test(JSON.stringify(result)) };
+  const read = await call('droid_read_session', { session: status.metadata.session, limit: 100 });
+  const entry = {
+    session: status.metadata.session, runId: status.latestRun.runId, state: status.latestRun.state, needsAttention: status.latestRun.needsAttention,
+    markerMatched: status.preview.text.trim() === marker, historyAvailable: read.historyAvailable,
+    authFailureObserved: /authenticat|access token|log in/i.test(JSON.stringify(status.latestRun.error) + status.preview.text),
+  };
   report.runs.push(entry);
   return entry;
 }
@@ -45,34 +51,37 @@ try {
     await client.connect(new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('../src/server.mjs', import.meta.url)), '--config', values.config], env: process.env, stderr: 'inherit' }));
   }
   report.tools = (await client.listTools()).tools.map((t) => t.name);
-  if (report.tools.length !== 7 || !report.tools.includes('droid_models')) throw new Error('Expected seven tools including droid_models');
+  for (const name of ['droid_create_session', 'droid_send_message', 'droid_wait_for_sessions', 'droid_models']) if (!report.tools.includes(name)) throw new Error(`Missing tool ${name}`);
   if (!values['expect-auth-failure']) {
     const catalog = await call('droid_models', {});
-    report.catalog = { fetchedAt: catalog.fetchedAt, modelCount: catalog.models.length, ...(values.model ? { selectedModelAvailable: catalog.models.some((model) => model.id === values.model) } : {}) };
-    if (values.model && !report.catalog.selectedModelAvailable) throw new Error('Explicit --model is absent from the current catalog; choose an ID from droid_models');
+    report.catalog = { fetchedAt: catalog.fetchedAt, modelCount: catalog.models.length, selectedModelAvailable: catalog.models.some((model) => model.id === values.model) };
+    if (!report.catalog.selectedModelAvailable) throw new Error('--model is absent from the current catalog; choose an ID from droid_models');
   }
+  report.workspaces = await call('droid_list_workspaces', {});
   const key = `smoke-${randomUUID()}`;
-  const firstArgs = { requestKey: key, workspace: config.approvedDirectories[0], autonomy: 'off', ...(values.model ? { model: values.model } : {}), prompt: 'Reply exactly DROID_MCP_SMOKE_OK. Do not call tools or edit files.' };
-  current = await call('droid_start', firstArgs);
-  if ((await call('droid_start', firstArgs)).runId !== current.runId) throw new Error('Idempotent start failed');
-  const first = record(await terminal(current.runId), 'DROID_MCP_SMOKE_OK');
+  const firstArgs = { requestKey: key, workspace: config.approvedDirectories[0], autonomy: 'off', model: values.model, replyTo: null, title: 'Controller smoke', prompt: 'Reply exactly DROID_MCP_SMOKE_OK. Do not call tools or edit files.' };
+  const created = await call('droid_create_session', firstArgs);
+  session = created.metadata.session;
+  if ((await call('droid_create_session', firstArgs)).metadata.session !== session) throw new Error('Idempotent create failed');
+  const first = await record(await settled(session), 'DROID_MCP_SMOKE_OK');
   if (values['expect-auth-failure']) {
-    if (first.state !== 'failed' || first.subtype !== 'error_during_execution' || !first.authFailureObserved || !first.resultAvailable) throw new Error('Expected a persisted terminal authentication failure');
+    if (first.state !== 'failed' || !first.authFailureObserved) throw new Error('Expected a persisted terminal authentication failure');
   } else {
-    if (first.state !== 'succeeded' || !first.markerMatched) throw new Error('Authenticated start did not return the expected marker');
-    current = await call('droid_continue', { runId: first.runId, requestKey: `${key}-resume`, autonomy: 'off', ...(values.model ? { model: values.model } : {}), prompt: 'Reply exactly DROID_MCP_RESUME_OK. Do not call tools or edit files.' });
-    const second = record(await terminal(current.runId), 'DROID_MCP_RESUME_OK');
-    if (second.state !== 'succeeded' || !second.markerMatched || second.droidSessionId !== first.droidSessionId || second.runId === first.runId) throw new Error('Authenticated resume failed');
+    if (first.state !== 'succeeded' || !first.markerMatched) throw new Error('Authenticated create did not return the expected marker');
+    const sent = await call('droid_send_message', { session, requestKey: `${key}-resume`, message: 'Reply exactly DROID_MCP_RESUME_OK. Do not call tools or edit files.', model: values.model, autonomy: 'off' });
+    const second = await record(await settled(sent.status.metadata.session), 'DROID_MCP_RESUME_OK');
+    if (second.state !== 'succeeded' || !second.markerMatched || second.session !== first.session || second.runId === first.runId) throw new Error('Authenticated resume failed');
+    report.usage = await call('droid_get_usage', { session });
   }
   report.passed = true;
   console.log('PASS: real MCP lifecycle smoke; evidence saved');
 } catch (error) {
   // Generic evidence only. Keep detailed provider diagnostics on the local host.
-  report.failure = 'Smoke failed; inspect droid_status/droid_result locally';
+  report.failure = 'Smoke failed; inspect droid_get_session_status locally';
   console.error(error.message);
   process.exitCode = 1;
 } finally {
-  if (current) await call('droid_cancel', { runId: current.runId }).catch(() => {});
+  if (session) await call('droid_cancel_session', { session }).catch(() => {});
   writeFileSync(values.out, `${JSON.stringify(report, null, 2)}\n`, { mode: 0o600 });
   await client.close();
 }

@@ -1,55 +1,18 @@
 import http from 'node:http';
 import { timingSafeEqual } from 'node:crypto';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js';
 import { JSONRPCMessageSchema } from '@modelcontextprotocol/sdk/types.js';
-import { z } from 'zod';
-import { loadConfig, autonomy, reasoning, conversationId } from './config.mjs';
+import { loadConfig } from './config.mjs';
+import { createMcp } from './mcp.mjs';
 import { Controller } from './controller.mjs';
 import { ModelCatalog } from './models.mjs';
-
-const runId = z.string().uuid().describe('Controller run UUID, not Droid session UUID');
-const requestKey = z.string().min(1).max(200).describe('Stable idempotency key; reuse only with exactly the same arguments');
-const prompt = z.string().min(1).max(100000);
-const options = {
-  autonomy: autonomy.optional().describe('Uses host default EVERY new turn; off is read-only, high is full Auto execution. Bounded by maxAutonomy'),
-  model: z.string().min(1).max(200).optional().describe('Current model ID from droid_models, explicit for this turn including continuation; do not guess or reuse historical IDs'),
-  reasoningEffort: reasoning.optional().describe('Independent of autonomy; overrides host reasoning for this turn. Must be supported by the chosen Factory model'),
-  puckConversationId: conversationId.optional().describe('Optional explicit Puck recipient for the authenticated Amp MCP. Defaults to the session recipient or host configuration; included in idempotency intent'),
-};
-
-function createMcp(controller, models) {
-  const server = new McpServer({ name: 'droid-controller', version: '0.1.0' });
-  const policy = `Approved workspace roots: ${JSON.stringify(controller.config.approvedDirectories)}. Autonomy ceiling: ${controller.config.maxAutonomy}. Default autonomy: ${controller.config.defaultAutonomy}. Host reasoning effort: ${controller.config.reasoningEffort ?? 'Droid default'}.`;
-  const register = (name, description, inputSchema, handler, readOnlyHint = false) => {
-    server.registerTool(name, { description, inputSchema, annotations: { readOnlyHint, destructiveHint: !readOnlyHint, openWorldHint: !readOnlyHint } }, async (args) => {
-      try {
-        const value = await handler(args);
-        return { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value };
-      } catch (error) {
-        const details = { error: error.message };
-        for (const key of ['code', 'headRunId', 'conflictingRunId', 'workspace']) if (error[key] !== undefined) details[key] = error[key];
-        return { isError: true, content: [{ type: 'text', text: JSON.stringify(details) }] };
-      }
-    });
-  };
-  const selection = 'Call droid_models when model selection is needed. Pass one of its current model IDs explicitly. Do not guess or reuse historical model IDs.';
-  register('droid_start', `Start a durable asynchronous Droid task in an approved workspace. requestKey is idempotent for identical intent. Autonomy defaults to high (full supported service-user access) unless the host configures otherwise; explicitly request off for read-only work. Mutating runs require exclusive access to overlapping workspaces. Poll status; no completion push notification is provided. ${selection} ${policy}`, { requestKey, prompt, workspace: z.string().min(1), ...options }, (args) => controller.start(args));
-  register('droid_continue', `Continue only the current head run of a linear Droid session, returning a NEW controller runId with the same underlying Droid UUID. Rejects active, unknown or stale-head sessions. To steer, cancel, wait for terminal status, then continue. ${selection} ${policy}`, { runId, requestKey, prompt, ...options }, (args) => controller.continue(args));
-  register('droid_status', 'Inspect state, session UUID, recent events, partial text and separate stderr. Only terminal=true ends polling; idle/silence is never success.', { runId }, ({ runId }) => controller.status(runId), true);
-  register('droid_result', 'Retrieve paginated final text and terminal outcome, or partial progress if no terminal result was stored. Failed/cancelled/unknown results remain inspectable.', { runId, offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(16000).default(12000) }, (args) => controller.result(args), true);
-  register('droid_list', 'Discover durable controller runs, newest first, across client reconnects.', { offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(25) }, (args) => controller.list(args), true);
-  register('droid_cancel', 'Explicitly interrupt one active controller run. Returns immediately; poll until terminal. Falls back to process-group termination after configured grace. Does not undo edits.', { runId }, ({ runId }) => controller.cancel(runId));
-  register('droid_models', 'List the models currently available to this authenticated Factory account and organization, discovered from the live Droid/Factory catalog. Excludes disabled models and historical or legacy IDs no longer available. Use one of these IDs when choosing a model for droid_start or droid_continue.', {}, () => models.get(), true);
-  return server;
-}
 
 async function main() {
   if (process.argv.length !== 4 || process.argv[2] !== '--config') throw new Error('Usage: node src/server.mjs --config /absolute/config.json');
   const config = loadConfig(process.argv[3]);
-  const controller = new Controller(config);
-  const models = new ModelCatalog({ ...config, stateDirectory: controller.dir });
+  const models = new ModelCatalog(config);
+  const controller = new Controller(config, models);
   let listener, mcp, closing = false;
   const shutdown = async () => {
     if (closing) return;
@@ -62,7 +25,7 @@ async function main() {
   };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
   if (config.transport === 'stdio') {
-    mcp = createMcp(controller, models);
+    mcp = createMcp(controller, models, config);
     await mcp.connect(new StdioServerTransport());
     process.stdin.on('end', shutdown);
     return;
@@ -92,7 +55,7 @@ async function main() {
       catch { return fail(400, 'Invalid MCP request'); }
       const messages = Array.isArray(body) ? body : [body];
       if (!messages.length || messages.some((message) => !JSONRPCMessageSchema.safeParse(message).success)) return fail(400, 'Invalid MCP request');
-      const server = createMcp(controller, models);
+      const server = createMcp(controller, models, config);
       // Use the public Web Standard transport so an SDK-internal failure can be
       // classified/sanitized BEFORE its HTTP response reaches the client.
       const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

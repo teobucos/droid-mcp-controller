@@ -26,7 +26,7 @@ function persist() {
 if (process.argv.slice(2).join(' ') !== 'exec --input-format stream-jsonrpc --output-format stream-jsonrpc') process.exit(2);
 createInterface({ input: process.stdin }).on('line', (line) => {
   const req = JSON.parse(line);
-  appendFileSync(audit, `${JSON.stringify({ ...req, mockPid: process.pid, workerPid: process.ppid })}\n`);
+  appendFileSync(audit, `${JSON.stringify({ ...req, ts: Date.now(), mockPid: process.pid, workerPid: process.ppid })}\n`);
   const p = req.params;
   switch (req.method) {
     case 'droid.initialize_session':
@@ -60,8 +60,14 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     case 'droid.update_session_settings':
       settings = { ...settings, ...p }; persist(); reply(req, {}); break;
     case 'droid.list_mcp_servers':
+      if (process.env.MOCK_PUCK_FAILURE === 'archived') {
+        reply(req, { servers: [{ name: 'amp-puck', status: 'failed', error: 'Error POSTing to endpoint: {"error":"This thread is archived"}', source: 'project', isManaged: false, serverType: 'http', requiresAuth: true, hasAuthTokens: true }], summary: { total: 1, connected: 0, connecting: 0, failed: 1 } }); break;
+      }
       reply(req, { servers: [{ name: 'amp-puck', status: 'connected', source: 'project', isManaged: false, serverType: 'http', requiresAuth: true, hasAuthTokens: process.env.MOCK_PUCK_FAILURE !== 'unauthenticated' }], summary: { total: 1, connected: 1, connecting: 0, failed: 0 } }); break;
     case 'droid.list_tools':
+      if (process.env.MOCK_PUCK_FAILURE === 'archived') {
+        send({ ...envelope('response'), id: req.id, error: { code: -32000, message: 'Unknown tool identifier(s): amp-puck___manage_amp' } }); break;
+      }
       reply(req, { tools: ['puck', 'manage_amp'].filter((name) => process.env.MOCK_PUCK_FAILURE !== 'unauthenticated' && !(name === 'puck' && process.env.MOCK_PUCK_FAILURE === 'puck-missing')).map((name) => ({ id: `amp-puck___${name}`, llmId: `amp-puck___${name}`, displayName: name, description: name, category: 'read', defaultAllowed: true, currentlyAllowed: name === 'puck' || process.env.MOCK_PUCK_FAILURE === 'admin-allowed' || !settings.disabledToolIds?.includes(`amp-puck___${name}`) })) }); break;
     case 'droid.add_user_message':
       turnId = p.messageId; prompt = p.text; reply(req, {});
@@ -83,12 +89,19 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         const now = Date.now();
         notify({ type: 'create_message', message: { id: randomUUID(), role: 'assistant', content: [{ type: 'tool_use', id: randomUUID(), name: 'LS', input: { directory_path: cwd } }], createdAt: now, updatedAt: now } });
       }
+      if (/^puck-(report|wrong|error)/.test(prompt)) {
+        const recipient = prompt.startsWith('puck-wrong') ? 'T-99999999-9999-4999-8999-999999999999' : prompt.match(/conversationID: (T-[0-9a-f-]{36})/)?.[1];
+        const toolUseId = randomUUID();
+        const at = Date.now();
+        notify({ type: 'create_message', message: { id: randomUUID(), role: 'assistant', content: [{ type: 'tool_use', id: toolUseId, name: 'amp-puck___puck', input: { action: 'send', params: { conversationID: recipient, message: 'mock report' } } }], createdAt: at, updatedAt: at } });
+        notify({ type: 'tool_result', messageId: randomUUID(), toolUseId, content: prompt.startsWith('puck-error') ? 'rejected' : 'accepted', isError: prompt.startsWith('puck-error') });
+      }
       if (!prompt.startsWith('no-echo:')) text(`progress:${prompt}`);
       timer = setTimeout(() => {
         const literalReply = prompt.match(/^Reply exactly ([A-Z_]+)\./);
         text(prompt.startsWith('no-echo:') ? 'Redacted task completed' : literalReply ? literalReply[1] : `answer:${prompt}`);
         terminal(prompt === 'agent-error' ? 'error' : 'completed');
-      }, prompt === 'slow' ? 2500 : 150);
+      }, prompt === 'slow' ? 2500 : prompt.startsWith('sleep:') ? Number(prompt.slice(6).split(' ')[0]) : 150);
       break;
     case 'droid.interrupt_session':
       clearTimeout(timer); reply(req, {}); terminal('cancelled'); break;

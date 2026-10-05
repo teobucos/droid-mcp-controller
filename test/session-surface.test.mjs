@@ -1,0 +1,661 @@
+// E2E for the Puck session surface: real controller process, real MCP client,
+// real Factory SDK process transport, protocol-peer mock `droid exec`.
+// Written before the implementation; each case names the wrong implementation it catches.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { mkdirSync, symlinkSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from 'node:fs';
+import { hostname, homedir } from 'node:os';
+import { join } from 'node:path';
+import { randomUUID } from 'node:crypto';
+import { boot, stop, call, audit, readState, writeCatalog, sleep } from './harness.mjs';
+
+const PUCK = 'T-11111111-1111-4111-8111-111111111111';
+const PUCK2 = 'T-22222222-2222-4222-8222-222222222222';
+const PUCK3 = 'T-33333333-3333-4333-8333-333333333333';
+const AMP_URL = 'https://ampcode.com/mcp?profile=external-agent';
+const CATALOG = [
+  { id: 'mock-model', displayName: 'Mock', supportedReasoningEfforts: ['low', 'high'] },
+  { id: 'model-b', displayName: 'B' },
+];
+const NEW_TOOLS = ['droid_create_session', 'droid_send_message', 'droid_get_session_status', 'droid_read_session', 'droid_wait_for_sessions', 'droid_find_sessions', 'droid_update_session', 'droid_cancel_session', 'droid_get_usage', 'droid_list_workspaces', 'droid_models'];
+const ALIASES = ['droid_start', 'droid_continue', 'droid_status', 'droid_result', 'droid_list', 'droid_cancel'];
+
+async function fixture(extra = {}, env = {}, existing) {
+  return decorate(await boot(extra, env, existing));
+}
+function decorate(h) {
+  writeCatalog(h, CATALOG);
+  h.ws = (name = '') => { const path = join(h.dir, 'workspace', name); mkdirSync(path, { recursive: true }); return path; };
+  h.create = (key, prompt, more = {}) => call(h, 'droid_create_session', { requestKey: key, workspace: h.ws(), prompt, model: 'mock-model', replyTo: null, ...more });
+  h.send = (session, key, message, more = {}) => call(h, 'droid_send_message', { session, requestKey: key, message, model: 'mock-model', ...more });
+  h.status = (session) => call(h, 'droid_get_session_status', { session });
+  h.settle = async (sessions, seconds = 15) => {
+    const end = Date.now() + seconds * 1000;
+    for (;;) {
+      const result = await call(h, 'droid_wait_for_sessions', { sessions, timeoutSeconds: 3 });
+      if (result.settled) return result;
+      if (Date.now() > end) throw new Error('Sessions did not settle');
+    }
+  };
+  h.turns = (prefix) => audit(h).filter((x) => x.method === 'droid.add_user_message' && x.params.text.startsWith(prefix));
+  h.waitFor = async (predicate, what, ms = 8000) => {
+    const end = Date.now() + ms;
+    while (Date.now() < end) { const v = await predicate(); if (v) return v; await sleep(25); }
+    throw new Error(`Timed out waiting for ${what}`);
+  };
+  h.capacity = async () => (await call(h, 'droid_list_workspaces', {})).capacity;
+  return h;
+}
+const done = async (h) => { await stop(h); rmSync(h.dir, { recursive: true, force: true }); };
+const rejectsWith = (promise, code) => assert.rejects(promise, (error) => { assert.equal(error.code, code, error.message); return true; });
+
+test('surface: eleven strict tools plus six thin deprecated aliases, polished errors', async (t) => {
+  const h = await fixture({ maxAutonomy: 'medium' });
+  t.after(() => done(h));
+  const tools = (await h.client.listTools()).tools;
+  await t.test('exact tool inventory, strict object schemas, deprecated aliases labelled', () => {
+    // droid_models is both a new tool and a legacy name: 11 + 6 aliases = 17.
+    assert.deepEqual(tools.map((x) => x.name).sort(), [...NEW_TOOLS, ...ALIASES].sort());
+    for (const name of NEW_TOOLS) {
+      const tool = tools.find((x) => x.name === name);
+      assert.equal(tool.inputSchema.type, 'object', name);
+      assert.equal(tool.inputSchema.additionalProperties, false, `${name} must reject unknown arguments`);
+      assert.ok(tool.description.length > 150 && /Example/.test(tool.description), `${name} needs a real description with an example`);
+    }
+    for (const name of ALIASES) assert.match(tools.find((x) => x.name === name).description, /^Deprecated/, name);
+    for (const name of ['droid_get_session_status', 'droid_read_session', 'droid_wait_for_sessions', 'droid_find_sessions', 'droid_get_usage', 'droid_list_workspaces', 'droid_models']) {
+      assert.equal(tools.find((x) => x.name === name).annotations.readOnlyHint, true, name);
+    }
+    const create = tools.find((x) => x.name === 'droid_create_session');
+    assert.ok(create.inputSchema.required.includes('replyTo') && create.inputSchema.required.includes('model'));
+    assert.match(tools.find((x) => x.name === 'droid_send_message').description, /interrupt:\s*true/);
+    assert.match(tools.find((x) => x.name === 'droid_send_message').description, /not Amp's|does not interrupt by default|default.*interrupt:\s*false/i);
+  });
+
+  await t.test('invalid input fails with an actionable structured error and no leaked internals', async () => {
+    const base = { requestKey: 'v', workspace: h.ws(), prompt: 'x', model: 'mock-model', replyTo: null };
+    const cases = [
+      [{ ...base, replyTo: undefined }, 'invalid_argument', /replyTo/],
+      [{ ...base, bogus: 1 }, 'invalid_argument', /bogus|unrecognized/i],
+      [{ ...base, workspace: 'relative/path' }, 'invalid_argument', /workspace/],
+      [{ ...base, replyTo: 'not-a-thread' }, 'invalid_argument', /replyTo/],
+      [{ ...base, labels: ['Bad Label'] }, 'invalid_argument', /labels/],
+      [{ ...base, workspace: join(h.dir, 'workspace-sibling') }, 'workspace_not_approved', /approved/],
+      [{ ...base, model: 'no-such-model' }, 'model_unavailable', /droid_models/],
+      [{ ...base, reasoningEffort: 'max' }, 'reasoning_unsupported', /low.*high/],
+      [{ ...base, autonomy: 'high' }, 'autonomy_exceeds_ceiling', /medium/],
+      [{ ...base, replyTo: PUCK }, 'reply_back_unavailable', /ampMcp|Amp MCP/],
+    ];
+    for (const [args, code, message] of cases) {
+      const raw = await h.client.callTool({ name: 'droid_create_session', arguments: args });
+      assert.equal(raw.isError, true, code);
+      const body = JSON.parse(raw.content[0].text);
+      assert.equal(body.error.code, code);
+      assert.match(body.error.message + body.error.action, message);
+      assert.equal(typeof body.error.retryable, 'boolean');
+      assert.ok(body.error.action.length > 10, 'error must say what to do next');
+      assert.ok(!raw.content[0].text.includes(h.dir.replace(/\/workspace.*/, '')) || code === 'workspace_not_approved' || code === 'invalid_argument', 'no state or private paths in errors');
+    }
+    assert.equal((await call(h, 'droid_find_sessions', {})).sessions.length, 0, 'rejected requests create nothing');
+    await rejectsWith(call(h, 'droid_get_session_status', { session: randomUUID() }), 'unknown_session');
+    await rejectsWith(call(h, 'droid_get_session_status', { session: 'not-a-uuid' }), 'invalid_argument');
+  });
+
+  await t.test('list_workspaces reports roots, default capacity 4 and policy', async () => {
+    const result = await call(h, 'droid_list_workspaces', {});
+    assert.deepEqual(result.workspaces, h.config.approvedDirectories);
+    assert.deepEqual(result.capacity, { maximum: 4, active: 0, queued: 0, available: 4 });
+    assert.equal(result.policy.maxAutonomy, 'medium');
+    assert.equal(result.policy.defaultAutonomy, 'off');
+    assert.equal(result.policy.replyBack, false);
+  });
+});
+
+test('session lifecycle: create, status, read, send, steer, cancel, update, find, usage', async (t) => {
+  const h = await fixture();
+  t.after(() => done(h));
+  let a;
+
+  await t.test('create returns at once with a controller handle; replay is idempotent; changed intent conflicts', async () => {
+    const first = await h.create('life-a', 'sleep:400 first', { title: 'Alpha', labels: ['review', 'alpha'] });
+    a = first.metadata.session;
+    assert.match(a, /^[0-9a-f-]{36}$/);
+    assert.equal(first.agentState.state, 'working');
+    assert.notEqual(first.latestRun.runId, a);
+    assert.equal(first.metadata.title, 'Alpha');
+    assert.deepEqual(first.metadata.labels, ['alpha', 'review']);
+    assert.equal(first.metadata.replyTo, null);
+    assert.equal(first.notification.state, 'disabled');
+    assert.equal((await h.create('life-a', 'sleep:400 first', { title: 'Alpha', labels: ['review', 'alpha'] })).metadata.session, a);
+    await rejectsWith(h.create('life-a', 'sleep:400 changed', { title: 'Alpha', labels: ['review', 'alpha'] }), 'request_key_conflict');
+    const settled = await h.settle([a]);
+    assert.equal(settled.settled, true);
+    const status = settled.sessions[0];
+    assert.equal(status.agentState.state, 'idle');
+    assert.equal(status.latestRun.state, 'succeeded');
+    assert.equal(status.latestRun.terminal, true);
+    assert.equal(status.latestRun.needsAttention, false);
+    assert.equal(status.preview.text, 'answer:sleep:400 first');
+  });
+
+  await t.test('no Factory/Droid session UUID, fingerprint or prompt leaks through any new tool', async () => {
+    const droidId = readState(h).sessions[a].droidSessionId;
+    assert.match(droidId, /^[0-9a-f-]{36}$/);
+    const outputs = [await h.status(a), await call(h, 'droid_read_session', { session: a }), await call(h, 'droid_find_sessions', {}), await call(h, 'droid_wait_for_sessions', { sessions: [a], timeoutSeconds: 0 }), await call(h, 'droid_get_usage', { session: a })];
+    const text = JSON.stringify(outputs);
+    for (const secret of [droidId, 'fingerprint', 'droidSessionId', 'stderrTail', 'textTail']) assert.ok(!text.includes(secret), secret);
+    assert.ok(!text.includes('sleep:400 first') || text.includes('answer:sleep:400 first'), 'prompt text itself is not retained');
+  });
+
+  await t.test('read paginates, never fabricates the user prompt, and rejects bad cursors', async () => {
+    const all = await call(h, 'droid_read_session', { session: a, limit: 100 });
+    assert.equal(all.historyAvailable, true);
+    assert.ok(all.messages.some((m) => m.role === 'assistant' && m.text === 'answer:sleep:400 first'));
+    assert.ok(all.messages.every((m) => m.role !== 'user'), 'prompts are never retained');
+    assert.equal(all.nextCursor, null);
+    const seen = [];
+    let cursor;
+    for (let i = 0; i < 20; i++) {
+      const page = await call(h, 'droid_read_session', { session: a, limit: 1, ...(cursor ? { cursor } : {}) });
+      assert.ok(page.messages.length <= 1);
+      seen.push(...page.messages);
+      cursor = page.nextCursor;
+      if (!cursor) break;
+    }
+    assert.deepEqual(seen, all.messages);
+    await rejectsWith(call(h, 'droid_read_session', { session: a, cursor: 'garbage' }), 'invalid_cursor');
+  });
+
+  await t.test('send to an idle session resumes the same Droid session (disposition started)', async () => {
+    const sent = await h.send(a, 'life-a-2', 'second');
+    assert.equal(sent.disposition, 'started');
+    assert.equal(sent.status.metadata.session, a);
+    assert.equal(sent.runId, sent.status.latestRun.runId);
+    assert.equal((await h.send(a, 'life-a-2', 'second')).runId, sent.runId, 'replay returns the accepted run');
+    await rejectsWith(h.send(a, 'life-a-2', 'different'), 'request_key_conflict');
+    await h.settle([a]);
+    assert.equal((await h.status(a)).preview.text, 'answer:second');
+    const droidId = readState(h).sessions[a].droidSessionId;
+    assert.equal(audit(h).filter((x) => x.method === 'droid.load_session').at(-1).params.sessionId, droidId);
+    // model is required for every new turn.
+    await assert.rejects(call(h, 'droid_send_message', { session: a, requestKey: 'no-model', message: 'x' }), /model/);
+    await rejectsWith(h.send(a, 'bad-model', 'x', { model: 'nope' }), 'model_unavailable');
+  });
+
+  await t.test('default send queues behind the active turn without interrupting it', async () => {
+    const first = await h.create('queue-a', 'sleep:600 q1');
+    const sid = first.metadata.session;
+    await h.waitFor(() => h.turns('sleep:600 q1').length, 'first turn');
+    const queued = await h.send(sid, 'queue-a-2', 'q2');
+    assert.equal(queued.disposition, 'queued');
+    assert.equal(queued.status.latestRun.state, 'queued');
+    assert.equal(queued.status.agentState.state, 'working');
+    await h.settle([sid]);
+    assert.equal((await h.status(sid)).preview.text, 'answer:q2');
+    assert.ok(!audit(h).some((x) => x.method === 'droid.interrupt_session' && h.turns('sleep:600 q1').some((y) => y.mockPid === x.mockPid)), 'queue must not interrupt');
+    const [t1, t2] = [h.turns('sleep:600 q1')[0], h.turns('q2')[0]];
+    assert.ok(t2.ts - t1.ts >= 500, 'second turn starts only after the first completed');
+    assert.notEqual(t1.mockPid, t2.mockPid, 'serial turns, never two on one Droid process');
+  });
+
+  await t.test('interrupt:true is a serial interrupt-and-resume: interrupt, cleanup, then run', async () => {
+    const first = await h.create('steer-a', 'slow');
+    const sid = first.metadata.session;
+    await h.waitFor(() => h.turns('slow').length, 'slow turn');
+    const steered = await h.send(sid, 'steer-a-2', 'new-direction', { interrupt: true });
+    assert.equal(steered.disposition, 'interrupting');
+    await h.settle([sid]);
+    const status = await h.status(sid);
+    assert.equal(status.latestRun.state, 'succeeded');
+    assert.equal(status.preview.text, 'answer:new-direction');
+    const wire = audit(h);
+    const slowPid = h.turns('slow')[0].mockPid;
+    const interrupt = wire.find((x) => x.method === 'droid.interrupt_session' && x.mockPid === slowPid);
+    assert.ok(interrupt, 'first turn was interrupted through the protocol');
+    assert.ok(h.turns('new-direction')[0].ts >= interrupt.ts, 'steering message submitted after the interrupt');
+    assert.notEqual(h.turns('new-direction')[0].mockPid, slowPid);
+    const runs = Object.values(readState(h).runs).filter((r) => r.sessionId === sid);
+    assert.deepEqual(runs.map((r) => r.state), ['interrupted', 'succeeded']);
+  });
+
+  await t.test('cancel stops the active turn and drops queued follow-ups; repeating is safe', async () => {
+    const first = await h.create('cancel-a', 'slow');
+    const sid = first.metadata.session;
+    await h.waitFor(() => h.turns('slow').length >= 2, 'turn started');
+    await h.send(sid, 'cancel-a-2', 'follow-1');
+    await h.send(sid, 'cancel-a-3', 'follow-2');
+    const cancelled = await call(h, 'droid_cancel_session', { session: sid });
+    assert.ok(['working', 'idle'].includes(cancelled.agentState.state));
+    await h.settle([sid]);
+    assert.equal(h.turns('follow-1').length + h.turns('follow-2').length, 0, 'queued intent never reached Droid');
+    const runs = Object.values(readState(h).runs).filter((r) => r.sessionId === sid).map((r) => r.state);
+    assert.deepEqual(runs, ['interrupted', 'cancelled', 'cancelled']);
+    assert.equal((await call(h, 'droid_cancel_session', { session: sid })).agentState.state, 'idle');
+    assert.equal((await call(h, 'droid_cancel_session', { session: a })).latestRun.state, 'succeeded', 'cancel never rewrites a finished outcome');
+  });
+
+  await t.test('update: title, labels, archive; conflicts and busy archive are rejected; replyTo untouched', async () => {
+    const updated = await call(h, 'droid_update_session', { session: a, title: 'Renamed', labels: { add: ['new'], remove: ['alpha'] } });
+    assert.equal(updated.metadata.title, 'Renamed');
+    assert.deepEqual(updated.metadata.labels, ['new', 'review']);
+    assert.equal(updated.metadata.replyTo, null);
+    await rejectsWith(call(h, 'droid_update_session', { session: a }), 'invalid_argument');
+    await rejectsWith(call(h, 'droid_update_session', { session: a, labels: { add: ['x'], remove: ['x'] } }), 'invalid_argument');
+    const busy = await h.create('busy-a', 'sleep:500 busy');
+    await rejectsWith(call(h, 'droid_update_session', { session: busy.metadata.session, archived: true }), 'session_busy');
+    await h.settle([busy.metadata.session]);
+    const archived = await call(h, 'droid_update_session', { session: a, archived: true });
+    assert.equal(archived.metadata.archived, true);
+    assert.ok(!(await call(h, 'droid_find_sessions', {})).sessions.some((s) => s.metadata.session === a));
+    assert.deepEqual((await call(h, 'droid_find_sessions', { archived: true })).sessions.map((s) => s.metadata.session), [a]);
+    assert.equal((await call(h, 'droid_update_session', { session: a, archived: false })).metadata.archived, false);
+    await call(h, 'droid_update_session', { session: a, archived: true });
+    const restored = await h.send(a, 'restore-a', 'wake');
+    assert.equal(restored.status.metadata.archived, false, 'a normal message restores an archived session');
+    await h.settle([a]);
+  });
+
+  await t.test('find: text, state, label, workspace, dates, archived; cursor stable under new activity', async () => {
+    const sub = h.ws('proj/sub');
+    const x = await h.create('find-x', 'sleep:50 zebra', { workspace: sub, title: 'Zebra hunt', labels: ['animals'] });
+    await h.settle([x.metadata.session]);
+    const ids = async (args) => (await call(h, 'droid_find_sessions', args)).sessions.map((s) => s.metadata.session);
+    assert.deepEqual(await ids({ query: 'zebra' }), [x.metadata.session], 'matches retained output and title, case-insensitively');
+    assert.deepEqual(await ids({ query: 'ZEBRA HUNT' }), [x.metadata.session]);
+    assert.deepEqual(await ids({ labels: ['animals'] }), [x.metadata.session]);
+    assert.deepEqual(await ids({ labels: ['animals', 'review'] }), [], 'labels are ANDed');
+    assert.deepEqual(await ids({ workspace: h.ws('proj') }), [x.metadata.session], 'workspace filter includes descendants');
+    assert.ok((await ids({ state: 'idle' })).includes(x.metadata.session));
+    assert.deepEqual(await ids({ state: 'working' }), []);
+    assert.deepEqual(await ids({ after: new Date(Date.now() + 60000).toISOString() }), []);
+    assert.deepEqual(await ids({ before: new Date(Date.now() - 3600000).toISOString() }), []);
+    await rejectsWith(call(h, 'droid_find_sessions', { after: '2026-10-02T00:00:00Z', before: '2026-10-01T00:00:00Z' }), 'invalid_argument');
+    const page1 = await call(h, 'droid_find_sessions', { limit: 2 });
+    assert.equal(page1.sessions.length, 2);
+    assert.ok(page1.nextCursor);
+    const fresh = await h.create('find-fresh', 'sleep:10 fresh');
+    const page2 = await call(h, 'droid_find_sessions', { limit: 100, cursor: page1.nextCursor });
+    const all = [...page1.sessions, ...page2.sessions].map((s) => s.metadata.session);
+    assert.equal(new Set(all).size, all.length, 'no duplicates when a newer session appears between pages');
+    assert.ok(!all.includes(fresh.metadata.session), 'a session created after page 1 never shifts later pages');
+    await h.settle([fresh.metadata.session]);
+    await rejectsWith(call(h, 'droid_find_sessions', { cursor: 'bad' }), 'invalid_cursor');
+  });
+
+  await t.test('usage sums each accepted turn once; nulls are never zero; ranges validated', async () => {
+    const fresh = await h.create('usage-a', 'sleep:10 u1');
+    const sid = fresh.metadata.session;
+    await h.settle([sid]);
+    await h.send(sid, 'usage-a-2', 'u2');
+    await h.send(sid, 'usage-a-2', 'u2');
+    await h.settle([sid]);
+    const usage = await call(h, 'droid_get_usage', { session: sid });
+    assert.equal(usage.session, sid);
+    assert.equal(usage.turns, 2);
+    assert.equal(usage.turnsWithUsage, 2);
+    assert.deepEqual(usage.tokens, { inputTokens: 14, outputTokens: 6, cacheReadTokens: 0, cacheCreationTokens: 0, thinkingTokens: 0 });
+    assert.equal(usage.factoryCredits, null);
+    const everything = await call(h, 'droid_get_usage', {});
+    assert.equal(everything.session, null);
+    assert.ok(everything.turns > usage.turns);
+    assert.equal((await call(h, 'droid_get_usage', { before: new Date(Date.now() - 3600000).toISOString() })).turns, 0);
+    await rejectsWith(call(h, 'droid_get_usage', { after: '2026-10-02T00:00:00Z', before: '2026-10-01T00:00:00Z' }), 'invalid_argument');
+    await rejectsWith(call(h, 'droid_get_usage', { session: randomUUID() }), 'unknown_session');
+  });
+});
+
+test('concurrency: parallel sessions, capacity queue, reader/writer workspace locks', async (t) => {
+  const h = await fixture();
+  t.after(() => done(h));
+
+  await t.test('four sessions in distinct workspaces really run at once and finish in parallel', async () => {
+    const started = Date.now();
+    const sessions = [];
+    for (let i = 1; i <= 4; i++) sessions.push((await h.create(`par-${i}`, `sleep:1500 par${i}`, { workspace: h.ws(`p${i}`), autonomy: 'high' })).metadata.session);
+    await h.waitFor(async () => (await h.capacity()).active === 4, 'four active runs');
+    const capacity = await h.capacity();
+    assert.deepEqual(capacity, { maximum: 4, active: 4, queued: 0, available: 0 });
+    const result = await h.settle(sessions);
+    assert.ok(result.sessions.every((s) => s.latestRun.state === 'succeeded'));
+    assert.ok(Date.now() - started < 4300, 'sequential execution would take about 6s');
+    assert.deepEqual(result.sessions.map((s) => s.preview.text), [1, 2, 3, 4].map((i) => `answer:sleep:1500 par${i}`), 'each session keeps its own output, in input order');
+    assert.equal(new Set(h.turns('sleep:1500').map((x) => x.mockPid)).size, 4);
+  });
+
+  await t.test('capacity exhaustion queues FIFO with visible capacity, then drains', async () => {
+    const small = await fixture({ maxConcurrentRuns: 2 });
+    try {
+      const ids = [];
+      for (let i = 1; i <= 3; i++) ids.push(await small.create(`cap-${i}`, `sleep:700 c${i}`, { workspace: small.ws(`c${i}`) }));
+      assert.deepEqual(ids.map((s) => s.latestRun.state === 'queued'), [false, false, true]);
+      assert.equal(ids[2].agentState.state, 'working');
+      assert.deepEqual(await small.capacity(), { maximum: 2, active: 2, queued: 1, available: 0 });
+      assert.equal(small.turns('sleep:700 c3').length, 0, 'queued work is not submitted early');
+      await small.settle(ids.map((s) => s.metadata.session));
+      assert.ok(small.turns('sleep:700 c3')[0].ts - small.turns('sleep:700 c1')[0].ts >= 600);
+      assert.deepEqual(await small.capacity(), { maximum: 2, active: 0, queued: 0, available: 2 });
+    } finally { await done(small); }
+  });
+
+  await t.test('writers exclude overlapping runs in both directions while disjoint workspaces proceed', async () => {
+    const api = h.ws('api/v1'); h.ws('web');
+    symlinkSync(h.ws('api'), join(h.dir, 'workspace/api-link'));
+    const writer = await h.create('lock-w', 'sleep:900 writer', { workspace: h.ws('api'), autonomy: 'medium' });
+    const nestedReader = await h.create('lock-r', 'sleep:100 nested-reader', { workspace: api });
+    const viaSymlink = await h.create('lock-s', 'sleep:100 via-symlink', { workspace: join(h.dir, 'workspace/api-link'), autonomy: 'low' });
+    const disjoint = await h.create('lock-d', 'sleep:100 disjoint', { workspace: h.ws('web'), autonomy: 'high' });
+    assert.equal(writer.latestRun.state === 'queued', false);
+    assert.equal(nestedReader.latestRun.state, 'queued', 'reader nested under a writer waits');
+    assert.equal(viaSymlink.latestRun.state, 'queued', 'symlink spelling resolves to the same canonical lock');
+    assert.equal(disjoint.latestRun.state === 'queued', false, 'distinct workspace is not blocked');
+    await sleep(400);
+    assert.equal(h.turns('sleep:100 nested-reader').length, 0);
+    assert.equal(h.turns('sleep:100 disjoint').length, 1);
+    await h.settle([writer, nestedReader, viaSymlink, disjoint].map((s) => s.metadata.session));
+    const writerStart = h.turns('sleep:900 writer')[0].ts;
+    for (const p of ['sleep:100 nested-reader', 'sleep:100 via-symlink']) assert.ok(h.turns(p)[0].ts - writerStart >= 800, `${p} ran only after the writer finished`);
+    // Reverse direction: a reader holds the tree, a parent writer must wait.
+    const reader = await h.create('lock-rr', 'sleep:700 holding-reader', { workspace: api });
+    const parentWriter = await h.create('lock-pw', 'sleep:50 parent-writer', { workspace: h.ws(), autonomy: 'high' });
+    assert.equal(parentWriter.latestRun.state, 'queued');
+    await h.settle([reader, parentWriter].map((s) => s.metadata.session));
+    assert.ok(h.turns('sleep:50 parent-writer')[0].ts - h.turns('sleep:700 holding-reader')[0].ts >= 600);
+  });
+
+  await t.test('readers share a workspace; a queued writer is not starved by later readers', async () => {
+    const shared = h.ws('shared');
+    const r1 = await h.create('share-1', 'sleep:900 r1', { workspace: shared });
+    const r2 = await h.create('share-2', 'sleep:900 r2', { workspace: shared });
+    assert.equal(r1.latestRun.state === 'queued' || r2.latestRun.state === 'queued', false, 'two readers may overlap');
+    await h.waitFor(async () => (await h.capacity()).active >= 2, 'readers concurrently active');
+    const writer = await h.create('share-w', 'sleep:100 w', { workspace: shared, autonomy: 'high' });
+    const late = await h.create('share-3', 'sleep:100 late-reader', { workspace: shared });
+    assert.equal(writer.latestRun.state, 'queued');
+    assert.equal(late.latestRun.state, 'queued', 'a reader arriving after a queued writer queues behind it');
+    await h.settle([r1, r2, writer, late].map((s) => s.metadata.session));
+    assert.ok(h.turns('sleep:100 w')[0].ts < h.turns('sleep:100 late-reader')[0].ts, 'FIFO: the writer runs before the later reader');
+    assert.ok(h.turns('sleep:100 late-reader')[0].ts - h.turns('sleep:100 w')[0].ts >= 90, 'and the reader waits for the writer');
+  });
+
+  await t.test('mixed autonomy sessions keep their own settings and permission policy', async () => {
+    const levels = ['off', 'low', 'medium', 'high'];
+    const sessions = [];
+    for (const level of levels) sessions.push((await h.create(`mix-${level}`, 'permission-once', { workspace: h.ws(`mix-${level}`), autonomy: level })).metadata.session);
+    const result = await h.settle(sessions);
+    const wire = audit(h);
+    const byPid = new Map(wire.filter((x) => x.method === 'droid.initialize_session' && x.params.cwd.includes('mix-')).map((x) => [x.mockPid, x]));
+    assert.equal(byPid.size, 4);
+    for (const init of byPid.values()) {
+      const level = levels.find((l) => init.params.cwd.endsWith(`mix-${l}`));
+      assert.equal(init.params.autonomyLevel, level);
+      assert.equal(init.params.interactionMode, level === 'off' ? 'spec' : 'auto');
+      const answer = wire.find((x) => x.mockPid === init.mockPid && x.id === 'permission-1' && x.type === 'response');
+      assert.equal(answer.result.selectedOption, level === 'high' ? 'proceed_once' : 'cancel', `permissions for ${level}`);
+    }
+    assert.deepEqual(result.sessions.map((s) => s.latestRun.state), ['interrupted', 'interrupted', 'interrupted', 'succeeded']);
+    assert.deepEqual(result.sessions.map((s) => s.latestRun.autonomy), levels);
+    assert.ok(result.sessions.slice(0, 3).every((s) => s.latestRun.needsAttention), 'declined permission needs attention');
+  });
+
+  await t.test('cancel and steer touch only their own session', async () => {
+    const mk = async (name) => (await h.create(`iso-${name}`, `sleep:2000 iso-${name}`, { workspace: h.ws(`iso-${name}`), autonomy: 'high' })).metadata.session;
+    const [A, B, C] = [await mk('a'), await mk('b'), await mk('c')];
+    await h.waitFor(() => ['a', 'b', 'c'].every((n) => h.turns(`sleep:2000 iso-${n}`).length), 'three active turns');
+    await call(h, 'droid_cancel_session', { session: B });
+    await h.send(C, 'iso-steer', 'steered', { interrupt: true });
+    const result = await h.settle([A, B, C]);
+    assert.deepEqual(result.sessions.map((s) => s.latestRun.state), ['succeeded', 'interrupted', 'succeeded']);
+    assert.equal(result.sessions[0].preview.text, 'answer:sleep:2000 iso-a');
+    assert.equal(result.sessions[2].preview.text, 'answer:steered');
+    const wire = audit(h);
+    const interrupted = new Set(wire.filter((x) => x.method === 'droid.interrupt_session').map((x) => x.mockPid));
+    const pid = (n) => h.turns(`sleep:2000 iso-${n}`)[0].mockPid;
+    assert.ok(!interrupted.has(pid('a')), 'the untouched session was never interrupted');
+    assert.ok(interrupted.has(pid('b')) && interrupted.has(pid('c')));
+  });
+
+  await t.test('wait: bounded to ten distinct known sessions, timeout is not failure, attention settles', async () => {
+    const ids = [];
+    for (let i = 0; i < 10; i++) ids.push((await h.create(`w10-${i}`, 'sleep:300 w10', { workspace: h.ws('w10') })).metadata.session);
+    const ten = await call(h, 'droid_wait_for_sessions', { sessions: ids, timeoutSeconds: 0 });
+    assert.equal(ten.settled, false);
+    assert.equal(ten.timedOut, true);
+    assert.equal(ten.sessions.length, 10);
+    assert.deepEqual(ten.sessions.map((s) => s.metadata.session), ids, 'input order');
+    const joined = await h.settle(ids, 20);
+    assert.ok(joined.sessions.every((s) => s.latestRun.state === 'succeeded'), 'ten sessions at capacity 4 all complete; the timeout never cancelled work');
+    const extra = await h.create('w10-extra', 'sleep:10 e');
+    await rejectsWith(call(h, 'droid_wait_for_sessions', { sessions: [...ids, extra.metadata.session], timeoutSeconds: 0 }), 'invalid_argument');
+    await rejectsWith(call(h, 'droid_wait_for_sessions', { sessions: [ids[0], ids[0]], timeoutSeconds: 0 }), 'invalid_argument');
+    await rejectsWith(call(h, 'droid_wait_for_sessions', { sessions: [ids[0], randomUUID()], timeoutSeconds: 0 }), 'unknown_session');
+    const asked = await h.create('w-ask', 'ask', { autonomy: 'high', workspace: h.ws('ask') });
+    const began = Date.now();
+    const result = await call(h, 'droid_wait_for_sessions', { sessions: [asked.metadata.session], timeoutSeconds: 30 });
+    assert.equal(result.settled, true);
+    assert.ok(Date.now() - began < 5000, 'returns as soon as the session settles');
+    assert.equal(result.sessions[0].latestRun.needsAttention, true);
+    assert.match(result.sessions[0].latestRun.questions[0].question, /Deploy\?/);
+    assert.deepEqual(result.sessions[0].latestRun.questions[0].options, ['yes', 'no']);
+  });
+});
+
+test('reply-back: per-session recipient, generic endpoint, misroute detection, preflight', async (t) => {
+  const h = await fixture({ ampMcp: { url: AMP_URL } });
+  t.after(() => done(h));
+
+  await t.test('concurrent sessions each carry only their own recipient on one thread-free endpoint', async () => {
+    const recipients = [PUCK, PUCK2, PUCK3];
+    const created = [];
+    for (const [i, replyTo] of recipients.entries()) created.push(await h.create(`rb-${i}`, 'puck-report', { replyTo, workspace: h.ws(`rb${i}`) }));
+    assert.deepEqual(created.map((s) => s.metadata.replyTo), recipients);
+    const result = await h.settle(created.map((s) => s.metadata.session));
+    assert.deepEqual(result.sessions.map((s) => s.notification.state), ['accepted', 'accepted', 'accepted']);
+    const wire = audit(h);
+    const inits = wire.filter((x) => x.method === 'droid.initialize_session' && x.params.mcpServers);
+    assert.equal(inits.length, 3);
+    for (const init of inits) {
+      assert.deepEqual(init.params.mcpServers, [{ name: 'amp-puck', type: 'http', url: AMP_URL, headers: [], oauth: { resource: 'https://ampcode.com/mcp' } }]);
+      assert.ok(!JSON.stringify(init.params).includes('threadID'), 'endpoint is never bound to a thread');
+      assert.deepEqual(init.params.disabledToolIds, ['amp-puck___manage_amp'], 'admin tool stays denied');
+    }
+    for (const [i, replyTo] of recipients.entries()) {
+      const turn = h.turns('puck-report').find((x) => x.params.text.includes(replyTo));
+      assert.ok(turn, `turn for ${replyTo}`);
+      for (const other of recipients.filter((r) => r !== replyTo)) assert.ok(!turn.params.text.includes(other), 'no recipient bleed between sessions');
+      assert.ok(turn.params.text.includes(created[i].metadata.session) && turn.params.text.includes(created[i].latestRun.runId));
+      assert.match(turn.params.text, /amp-puck___puck/);
+    }
+  });
+
+  await t.test('notification flags a missing, rejected or misrouted agent report', async () => {
+    const quiet = await h.create('rb-quiet', 'normal', { replyTo: PUCK });
+    const wrong = await h.create('rb-wrong', 'puck-wrong', { replyTo: PUCK });
+    const failed = await h.create('rb-error', 'puck-error', { replyTo: PUCK });
+    const result = await h.settle([quiet, wrong, failed].map((s) => s.metadata.session));
+    const [q, w, f] = result.sessions;
+    assert.equal(q.notification.state, 'not_sent');
+    assert.equal(q.latestRun.needsAttention, false);
+    assert.equal(w.notification.state, 'failed');
+    assert.equal(w.notification.error.code, 'reply_misrouted');
+    assert.equal(w.latestRun.needsAttention, true);
+    assert.equal(f.notification.state, 'failed');
+    assert.equal(f.notification.error.code, 'reply_failed');
+    assert.equal(f.latestRun.state, 'succeeded', 'a notification failure never turns a done run into a failed run');
+  });
+
+  await t.test('send can explicitly retarget or detach; omission keeps the session recipient', async () => {
+    const s = await h.create('rb-retarget', 'normal', { replyTo: PUCK });
+    await h.settle([s.metadata.session]);
+    assert.equal((await h.send(s.metadata.session, 'rt-1', 'puck-report')).status.metadata.replyTo, PUCK);
+    await h.settle([s.metadata.session]);
+    const moved = await h.send(s.metadata.session, 'rt-2', 'puck-report', { replyTo: PUCK2 });
+    assert.equal(moved.status.metadata.replyTo, PUCK2);
+    await h.settle([s.metadata.session]);
+    assert.equal((await h.status(s.metadata.session)).notification.state, 'accepted');
+    const detached = await h.send(s.metadata.session, 'rt-3', 'normal', { replyTo: null });
+    assert.equal(detached.status.metadata.replyTo, null);
+    await h.settle([s.metadata.session]);
+    assert.equal((await h.status(s.metadata.session)).notification.state, 'disabled');
+  });
+
+  await t.test('detached sessions never touch the Amp MCP endpoint', async () => {
+    const before = audit(h).filter((x) => x.method === 'droid.initialize_session').length;
+    const s = await h.create('rb-detached', 'normal', { replyTo: null, workspace: h.ws('detached') });
+    await h.settle([s.metadata.session]);
+    const init = audit(h).filter((x) => x.method === 'droid.initialize_session').slice(before).find((x) => x.params.cwd.endsWith('detached'));
+    assert.equal(init.params.mcpServers, undefined);
+    assert.equal(init.params.disabledToolIds, undefined);
+  });
+});
+
+test('preflight: actionable Amp MCP failures replace the masked unknown-tool error', async (t) => {
+  const cases = [
+    ['archived', 'amp_mcp_unreachable', /archived/i],
+    ['unauthenticated', 'amp_mcp_auth_required', /authoriz|sign/i],
+    ['puck-missing', 'amp_mcp_tool_missing', /puck/],
+    ['admin-allowed', 'amp_mcp_admin_tool_exposed', /manage_amp|admin/i],
+  ];
+  for (const [mode, code, message] of cases) {
+    await t.test(mode, async () => {
+      const h = await fixture({ ampMcp: { url: AMP_URL } }, { MOCK_PUCK_FAILURE: mode });
+      try {
+        const created = await h.create(`pre-${mode}`, 'no-echo:must not run', { replyTo: PUCK });
+        const status = (await h.settle([created.metadata.session])).sessions[0];
+        assert.equal(status.latestRun.state, 'failed');
+        assert.equal(status.latestRun.error.code, code);
+        assert.match(status.latestRun.error.message + status.latestRun.error.action, message);
+        assert.ok(!/Unknown tool identifier/.test(JSON.stringify(status)), 'the disabled-tool masking error must not surface');
+        assert.ok(status.latestRun.error.action.length > 10);
+        assert.equal(audit(h).filter((x) => x.method === 'droid.add_user_message').length, 0, 'no task prompt is submitted');
+        assert.ok(!JSON.stringify(status).includes('pendingAuth'));
+        const detached = await h.create(`pre-${mode}-detached`, 'normal', { replyTo: null });
+        assert.equal((await h.settle([detached.metadata.session])).sessions[0].latestRun.state, 'succeeded', 'detached work does not depend on the Amp endpoint');
+      } finally { await done(h); }
+    });
+  }
+});
+
+test('configuration: no default recipient, no thread-bound endpoint, capacity bounds', async () => {
+  const legacy = [
+    [{ puck: { conversationId: PUCK } }, /puck|ampMcp/i],
+    [{ ampMcp: { url: `${AMP_URL}&threadID=${PUCK}` } }, /threadID|thread/i],
+    [{ ampMcp: { url: AMP_URL, conversationId: PUCK } }, /conversationId|unrecognized/i],
+    [{ maxConcurrentRuns: 17 }, /maxConcurrentRuns/],
+    [{ maxConcurrentRuns: 0 }, /maxConcurrentRuns/],
+  ];
+  for (const [extra, message] of legacy) await assert.rejects(boot(extra), message);
+  const sixteen = await fixture({ maxConcurrentRuns: 16, ampMcp: {} });
+  try {
+    const result = await call(sixteen, 'droid_list_workspaces', {});
+    assert.equal(result.capacity.maximum, 16);
+    assert.equal(result.policy.replyBack, true);
+  } finally { await done(sixteen); }
+});
+
+test('durability: v2 migration with retained backup, restart, crash fail-closed, queue loss', async (t) => {
+  const h0 = await fixture({ maxConcurrentRuns: 1 });
+  const dir = h0.dir;
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  await stop(h0);
+
+  await t.test('v2 state migrates to sessions; backup is byte-identical; heads, unknown and idempotency survive', async () => {
+    const workspace = join(dir, 'workspace');
+    const mockHome = join(dir, 'mock');
+    const [s1, s2, lost] = [randomUUID(), randomUUID(), randomUUID()];
+    const run = (n, extra) => ({ runId: randomUUID(), requestKey: `legacy-${n}`, fingerprint: 'f'.repeat(64), workspace, autonomy: 'off', createdAt: `2026-10-0${n}T00:00:00.000Z`, updatedAt: `2026-10-0${n}T00:00:00.000Z`, droidSessionId: null, state: 'succeeded', events: [], textTail: `legacy output ${n}`, stderrTail: '', ...extra });
+    const r1 = run(1, { droidSessionId: s1 });
+    const r2 = run(2, { droidSessionId: s1, parentRunId: r1.runId, puckConversationId: PUCK });
+    const r3 = run(3, { droidSessionId: s2 });
+    const r4 = run(4, { droidSessionId: lost, state: 'unknown', error: 'Controller stopped before a durable terminal outcome.' });
+    const r5 = run(5, { state: 'failed', error: 'setup failed' });
+    for (const id of [s1, s2, lost]) writeFileSync(join(mockHome, `${id}.json`), JSON.stringify({ cwd: workspace, settings: {} }));
+    const runs = Object.fromEntries([r1, r2, r3, r4, r5].map((r) => [r.runId, r]));
+    const v2 = { version: 2, host: hostname(), home: homedir(), factoryHomeOverride: null, runs, sessionHeads: { [s1]: r2.runId, [s2]: r3.runId, [lost]: r4.runId } };
+    mkdirSync(join(dir, 'state'), { recursive: true, mode: 0o700 });
+    const original = JSON.stringify(v2);
+    writeFileSync(join(dir, 'state/state.json'), original, { mode: 0o600 });
+    const h = decorate(await boot({ maxConcurrentRuns: 1, ampMcp: {} }, {}, dir));
+    try {
+      const state = readState(h);
+      assert.equal(state.version, 3);
+      assert.equal(Object.keys(state.sessions).length, 4, 'two runs of one Droid session share one controller session; the setup failure is its own');
+      assert.equal(readFileSync(join(dir, 'state/state.json.v2.bak'), 'utf8'), original, 'pre-migration backup is byte-identical');
+      assert.equal((readdirSync(join(dir, 'state')).filter((f) => f.includes('.bak'))).length, 1);
+      assert.equal(state.sessions[state.runs[r2.runId].sessionId].headRunId, r2.runId);
+      assert.equal(state.runs[r1.runId].sessionId, state.runs[r2.runId].sessionId);
+      assert.equal(state.sessions[state.runs[r2.runId].sessionId].replyTo, PUCK, 'recorded explicit routing is preserved, not rewritten');
+      assert.equal(state.sessions[state.runs[r3.runId].sessionId].replyTo, null);
+      assert.ok(!readFileSync(join(dir, 'state/state.json'), 'utf8').includes('"prompt"'));
+      // Old handles and idempotency still work through the deprecated aliases.
+      assert.equal((await call(h, 'droid_status', { runId: r2.runId })).droidSessionId, s1);
+      await assert.rejects(call(h, 'droid_start', { requestKey: 'legacy-1', prompt: 'x', workspace }), /requestKey|different/i);
+      // Unknown outcome stays fail-closed through the new surface.
+      const unknownSession = state.runs[r4.runId].sessionId;
+      const status = await call(h, 'droid_get_session_status', { session: unknownSession });
+      assert.equal(status.agentState.state, 'unknown');
+      assert.equal((await call(h, 'droid_wait_for_sessions', { sessions: [unknownSession], timeoutSeconds: 0 })).settled, true);
+      await rejectsWith(call(h, 'droid_send_message', { session: unknownSession, requestKey: 'u', message: 'x', model: 'mock-model' }), 'session_unknown_outcome');
+      await assert.rejects(call(h, 'droid_continue', { runId: r4.runId, requestKey: 'u2', prompt: 'x' }), /unknown|reconcile/i);
+      // A migrated head can be continued with the new tool; the old ancestor cannot.
+      await assert.rejects(call(h, 'droid_continue', { runId: r1.runId, requestKey: 'stale', prompt: 'x' }), (e) => e.code === 'not_session_head' && e.headRunId === r2.runId);
+      const next = await call(h, 'droid_send_message', { session: state.runs[r3.runId].sessionId, requestKey: 'after-migrate', message: 'continue', model: 'mock-model' });
+      await h.settle([next.status.metadata.session]);
+      assert.equal(audit(h).filter((x) => x.method === 'droid.load_session').at(-1).params.sessionId, s2);
+    } finally { await stop(h); }
+  });
+
+  await t.test('crash: running becomes unknown, queued never starts or replays, titles/labels persist', async () => {
+    const h = decorate(await boot({ maxConcurrentRuns: 1 }, {}, dir));
+    const mk = (key, prompt, more, handle = h) => call(handle, 'droid_create_session', { requestKey: key, workspace: join(dir, 'workspace'), prompt, model: 'mock-model', replyTo: null, ...more });
+    const running = await mk('crash-run', 'slow', { title: 'Keep me', labels: ['persist'] });
+    const queued = await mk('crash-queued', 'queued-never-submitted', { autonomy: 'high' });
+    assert.equal(queued.latestRun.state, 'queued');
+    await h.waitFor(() => audit(h).some((x) => x.method === 'droid.add_user_message' && x.params.text === 'slow'), 'running turn');
+    const before = audit(h).filter((x) => x.method === 'droid.add_user_message').length;
+    await stop(h, 'SIGKILL'); await sleep(300);
+    const again = decorate(await boot({ maxConcurrentRuns: 1 }, {}, dir));
+    try {
+      const r = await call(again, 'droid_get_session_status', { session: running.metadata.session });
+      assert.equal(r.agentState.state, 'unknown');
+      assert.equal(r.latestRun.state, 'unknown');
+      assert.equal(r.latestRun.needsAttention, true);
+      assert.equal(r.metadata.title, 'Keep me');
+      assert.deepEqual(r.metadata.labels, ['persist']);
+      const q = await call(again, 'droid_get_session_status', { session: queued.metadata.session });
+      assert.equal(q.latestRun.state, 'cancelled');
+      assert.equal(q.latestRun.error.code, 'queue_lost');
+      assert.equal(audit(again).filter((x) => x.method === 'droid.add_user_message').length, before, 'nothing was replayed or started on recovery');
+      assert.equal((await mk('crash-run', 'slow', { title: 'Keep me', labels: ['persist'] }, again)).metadata.session, running.metadata.session, 'idempotency survives the crash');
+      await rejectsWith(call(again, 'droid_send_message', { session: running.metadata.session, requestKey: 'after-crash', message: 'x', model: 'mock-model' }), 'session_unknown_outcome');
+      const resumed = await call(again, 'droid_send_message', { session: queued.metadata.session, requestKey: 'retry-queued', message: 'retry', model: 'mock-model' });
+      await again.settle([resumed.status.metadata.session]);
+    } finally { await stop(again); }
+  });
+});
+
+test('aliases: the seven legacy tools are thin views over the session core', async (t) => {
+  const h = await fixture({ ampMcp: {} });
+  t.after(() => done(h));
+  await t.test('droid_start creates a core session, detached unless puckConversationId is explicit', async () => {
+    const run = await call(h, 'droid_start', { requestKey: 'alias-1', workspace: h.ws(), prompt: 'normal' });
+    assert.equal(run.terminal, false);
+    const sessionId = readState(h).runs[run.runId].sessionId;
+    const status = await h.status(sessionId);
+    assert.equal(status.metadata.replyTo, null, 'no host-default recipient is ever inferred');
+    assert.equal(status.latestRun.runId, run.runId);
+    assert.ok((await call(h, 'droid_find_sessions', {})).sessions.some((s) => s.metadata.session === sessionId));
+    const routed = await call(h, 'droid_start', { requestKey: 'alias-2', workspace: h.ws(), prompt: 'normal', puckConversationId: PUCK });
+    assert.equal((await h.status(readState(h).runs[routed.runId].sessionId)).metadata.replyTo, PUCK);
+  });
+  await t.test('droid_continue keeps no-queue semantics and the legacy string error shape', async () => {
+    const run = await call(h, 'droid_start', { requestKey: 'alias-3', workspace: h.ws(), prompt: 'slow' });
+    const raw = await h.client.callTool({ name: 'droid_continue', arguments: { runId: run.runId, requestKey: 'alias-3b', prompt: 'x' } });
+    assert.equal(raw.isError, true);
+    assert.equal(typeof JSON.parse(raw.content[0].text).error, 'string');
+    await call(h, 'droid_cancel', { runId: run.runId });
+    await h.settle([readState(h).runs[run.runId].sessionId]);
+    const next = await call(h, 'droid_continue', { runId: run.runId, requestKey: 'alias-3c', prompt: 'follow' });
+    assert.equal(next.droidSessionId, run.droidSessionId ?? next.droidSessionId);
+    assert.equal(readState(h).runs[next.runId].sessionId, readState(h).runs[run.runId].sessionId);
+  });
+});
