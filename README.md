@@ -203,9 +203,12 @@ live acceptance requires the unique agent-origin marker to arrive in the intende
 Puck conversation and a correlated reply to reach Droid.
 
 **OAuth is account authorization, not a demonstrated thread/tool-scoped grant.**
-The actual external-agent profile also advertises `manage_amp`. Client-side tool
-denial reduces model exposure, not credential rights or OS access; an agent with
-High service-user access is trusted with that user's environment. No credentials,
+The external-agent profile may expose additional Amp tools now or in the future.
+Before task submission, the controller dynamically disables every discovered
+`amp-puck___*` tool except exactly `amp-puck___puck`, then re-lists and fails
+closed if any other Amp tool remains allowed. This client-side denial reduces
+model exposure, not credential rights or OS access; an agent with High
+service-user access is trusted with that user's environment. No credentials,
 personal recipient IDs or host configuration belong in public source/history.
 See [Factory MCP](https://docs.factory.com/cli/configuration/mcp) and
 [Amp MCP](https://ampcode.com/docs/markdown/customize/mcp).
