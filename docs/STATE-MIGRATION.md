@@ -32,6 +32,16 @@ Every start also recovers: runs that were `starting/running/cancelling` become `
 `queue_lost` because their prompt was memory-only and they were never submitted. Nothing
 is replayed.
 
+## Known approximations of migrated history
+
+- **Submission is inferred for legacy runs.** v1/v2 records never stored whether the task prompt
+  reached Droid. A migrated run counts as submitted (usage turns, `historyAvailable:false` when its
+  transcript is missing) if it had a Droid session UUID or a stored result. A legacy run that failed in
+  Amp MCP preflight after the session was created is therefore counted as a turn in `droid_get_usage`
+  and shows a "no transcript" notice. New runs record `submittedAt` exactly.
+- **Development builds of v3.** State written by pre-release v3 builds (before the `submittedAt`
+  field) is not a supported input; only v1/v2 production state is migrated.
+
 ## Roll back
 
 Stop the controller. Restore `state.json.v2.bak` over `state.json` (and keep the v3 file as

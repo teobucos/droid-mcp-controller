@@ -37,26 +37,28 @@ async function preflightAmpMcp() {
     const server = (await session.listMcpServers().catch(() => ({ servers: [] }))).servers.find((item) => item.name === 'amp-puck');
     if (server?.requiresAuth && !server.hasAuthTokens) throw new SetupError('amp_mcp_auth_required', 'The Amp MCP requires authorization that this host has not completed');
     if (server?.status === 'connecting') { await new Promise((resolve) => setTimeout(resolve, 1000)); continue; }
-    if (server && server.status !== 'connected') // Raw server text can carry ids, paths and OAuth state: report only recognised causes.
+    if (server && server.status !== 'connected') {
+      // Raw server text can carry ids, paths and OAuth state: report only recognised causes.
       throw new SetupError('amp_mcp_unreachable', `The Amp MCP server is ${server.status}${/archived/i.test(server.error ?? '') ? ' (the endpoint reports an archived thread)' : /unauthori[sz]ed|401/i.test(server.error ?? '') ? ' (the endpoint rejected the credentials)' : ''}`);
-    if (!server) {
-      // Observed live: an injected server that fails to start (no stored OAuth token for
-      // this exact URL, a rejected connection) is dropped from the listing instead of
-      // being reported as failed. Registered tools are then the only signal.
-      const registered = await session.listMcpTools().catch(() => []);
-      if (!registered.some((tool) => JSON.stringify(tool).includes('amp-puck'))) {
-        if (attempt < 8) { await new Promise((resolve) => setTimeout(resolve, 1000)); continue; }
-        throw new SetupError('amp_mcp_not_started', 'The amp-puck MCP server did not start: it is not registered with Droid');
-      }
     }
+    // The server's own registry is the ground truth for which tools exist. Observed live: an injected
+    // server that fails to start (no stored OAuth token for this exact URL, a rejected connection) is
+    // dropped from the server listing instead of being reported as failed, so an empty registry means
+    // "not started". Without puck in the registry the deny list cannot be trusted either: fail closed.
     const list = async () => {
       try { return await withTimeout(session.listTools(), 15000); } catch (error) {
         throw new SetupError('amp_mcp_setup_failed', /timed out/.test(error.message) ? 'MCP tool discovery timed out' : 'MCP tool discovery failed');
       }
     };
-    // The SDK reports a tool's llmId as `id` and drops the protocol id used for denial. Identify the
-    // server's tools from its own registry as well as by prefix, and deny by the protocol form.
+    // The SDK reports a tool's llmId as `id` and drops the protocol id used for denial; identify the
+    // server's tools from the registry as well as by prefix, and deny by the protocol form.
     const registry = (await session.listMcpTools().catch(() => [])).filter((tool) => tool.serverName === 'amp-puck').map((tool) => tool.name);
+    if (!registry.includes('puck')) {
+      if (attempt < 8) { await new Promise((resolve) => setTimeout(resolve, 1000)); continue; }
+      throw server
+        ? new SetupError('amp_mcp_tool_missing', 'The Amp MCP is connected but does not register the puck tool')
+        : new SetupError('amp_mcp_not_started', 'The amp-puck MCP server did not start: it is not registered with Droid');
+    }
     const isAmp = (tool) => tool.id.startsWith('amp-puck___') || registry.some((name) => tool.id === name || tool.id.endsWith(`___${name}`));
     const others = (all) => all.filter((tool) => isAmp(tool) && tool.id !== PUCK_TOOL && tool.id !== 'puck');
     let tools = await list();

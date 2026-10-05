@@ -41,9 +41,22 @@ export function atomicJson(path, data) {
   const fd = openSync(temp, 'w', 0o600);
   try { writeFileSync(fd, JSON.stringify(data)); fsyncSync(fd); } finally { closeSync(fd); }
   renameSync(temp, path);
-  const dir = openSync(join(path, '..'), 'r');
-  try { fsyncSync(dir); } finally { closeSync(dir); }
+  // From here the new bytes are in place but their durability is unknown. Memory cannot be rolled
+  // back to match disk, so the only safe move is to stop and let startup recovery decide (anything
+  // accepted but not started becomes cancelled/queue_lost, anything started becomes unknown).
+  try {
+    const dir = openSync(join(path, '..'), 'r');
+    try { fsyncSync(dir); } finally { closeSync(dir); }
+  } catch (error) {
+    console.error(`Durable state could not be synced after replacement (${error.code ?? 'error'}); stopping so recovery can decide.`);
+    process.exit(70);
+  }
 }
+
+// A stored terminal result must carry every field the SDK produces before it can decide an outcome.
+export const completeResult = (result) => ['success', 'interrupted', 'error_during_execution', 'error_structured_output'].includes(result?.subtype)
+  && result.success === (result.subtype === 'success') && Array.isArray(result.messages) && typeof result.text === 'string'
+  && typeof result.durationMs === 'number' && typeof result.turnCount === 'number' && 'tokenUsage' in result;
 
 export const defaultTitle = (sessionId) => `Droid session ${sessionId.slice(0, 8)}`;
 
@@ -159,7 +172,8 @@ export function openStore(config) {
     for (const [id, run] of Object.entries(state.runs)) {
       if (id !== run.runId) throw new Error('Corrupt state: runId differs from record key');
       if (!state.sessions[run.sessionId]) throw new Error('Corrupt state: run without session');
-      if (run.droidSessionId && state.sessions[run.sessionId].droidSessionId && run.droidSessionId !== state.sessions[run.sessionId].droidSessionId) {
+      // Every run that names a Droid session must name exactly its controller session's (no import, no fork).
+      if (run.droidSessionId && run.droidSessionId !== state.sessions[run.sessionId].droidSessionId) {
         throw new Error('Corrupt state: a run names a Droid session different from its controller session');
       }
       if (run.state === 'queued') {
@@ -171,7 +185,7 @@ export function openStore(config) {
         if (run.result) {
           const result = JSON.parse(readFileSync(join(dir, `${id}.result.json`), 'utf8'));
           if (result.sessionId !== run.droidSessionId) throw new Error('Corrupt state: terminal session UUID mismatch');
-          if (typeof result.subtype !== 'string' || !Array.isArray(result.messages) || typeof result.text !== 'string') {
+          if (!completeResult(result)) {
             // An incomplete result must never be promoted to an outcome.
             run.state = 'unknown'; run.errorCode = 'unknown_outcome'; run.result = false;
             run.error = 'The stored terminal result is incomplete; reconcile Droid history and the workspace locally.';

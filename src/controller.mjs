@@ -258,7 +258,7 @@ export class Controller {
       this.changed(run);
       // A turn that ended with no terminal result leaves its session in doubt: queued follow-ups were
       // written for a different situation, so Puck decides instead of the queue resuming them.
-      if (!result && run.state === 'failed') {
+      if (!result && (run.state === 'failed' || run.state === 'timed_out')) {
         for (const queued of this.runsOf(run.sessionId).filter((other) => other.state === 'queued')) this.cancelRun(queued, 'predecessor_failed', 'The previous turn ended without a result, so this queued turn was dropped without being submitted.');
       }
       this.pump();

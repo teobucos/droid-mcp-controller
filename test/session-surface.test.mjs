@@ -3,13 +3,14 @@
 // Written before the implementation; each case names the wrong implementation it catches.
 import test from 'node:test';
 import assert from 'node:assert/strict';
+
 import { mkdirSync, symlinkSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync, chmodSync } from 'node:fs';
-import { hostname, homedir } from 'node:os';
+import { hostname, homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
 import { once } from 'node:events';
-import { boot, stop, call, audit, readState, writeCatalog, sleep, token } from './harness.mjs';
+import { boot, stop, call, audit, readState, writeCatalog, sleep, token, root } from './harness.mjs';
 
 const PUCK = 'T-11111111-1111-4111-8111-111111111111';
 const PUCK2 = 'T-22222222-2222-4222-8222-222222222222';
@@ -831,6 +832,61 @@ test('adversarial fixes: unexpected worker death, default-deny aliases, admissio
     } finally { await done(f); }
   });
 
+  await t.test('a timed-out turn also drops queued follow-ups; a steering message survives its interrupted predecessor', async () => {
+    // The peer ignores the interrupt, so the process group is killed and no terminal result exists.
+    const h = await fixture({ runTimeoutMs: 1500, cancelGraceMs: 300 }, { MOCK_IGNORE_INTERRUPT: '1' });
+    try {
+      const s = await h.create('to-a', 'silent');
+      const sid = s.metadata.session;
+      await h.waitFor(() => h.turns('silent').length, 'turn submitted');
+      await h.send(sid, 'to-b', 'follow-after-timeout');
+      const status = (await h.settle([sid])).sessions[0];
+      assert.equal(status.latestRun.error.code, 'predecessor_failed');
+      assert.deepEqual(Object.values(readState(h).runs).filter((r) => r.sessionId === sid).map((r) => r.state), ['timed_out', 'cancelled']);
+      assert.equal(h.turns('follow-after-timeout').length, 0);
+    } finally { await done(h); }
+    const g = await fixture();
+    try {
+      const steer = await g.create('to-c', 'slow');
+      await g.waitFor(() => g.turns('slow').length, 'slow turn');
+      await g.send(steer.metadata.session, 'to-d', 'steered-survives', { interrupt: true });
+      assert.equal((await g.settle([steer.metadata.session])).sessions[0].preview.text, 'answer:steered-survives');
+    } finally { await done(g); }
+  });
+
+  await t.test('without puck in the server registry the deny list cannot be trusted: fail closed', async () => {
+    const h = await fixture({ ampMcp: { url: AMP_URL }, runTimeoutMs: 30000 }, { MOCK_PUCK_FAILURE: 'alias-blind' });
+    try {
+      const s = await h.create('blind-a', 'no-echo:never', { replyTo: PUCK });
+      const status = (await h.settle([s.metadata.session], 30)).sessions[0];
+      assert.equal(status.latestRun.state, 'failed');
+      assert.equal(status.latestRun.error.code, 'amp_mcp_tool_missing');
+      assert.equal(audit(h).filter((x) => x.method === 'droid.add_user_message').length, 0);
+    } finally { await done(h); }
+  });
+
+  await t.test('a directory fsync failure after the state rename stops the controller; recovery never starts the accepted turn', async () => {
+    const flag = join(tmpdir(), `droid-fsync-fault-${randomUUID()}`);
+    const h = await fixture({}, { FSYNC_FAULT_FLAG: flag, NODE_OPTIONS: `--import=${join(root, 'test/fs-fault.mjs')}` });
+    try {
+      writeFileSync(flag, '');
+      const failed = await h.create('fsync-a', 'normal').then(() => 'accepted', () => 'rejected');
+      await once(h.proc, 'exit');
+      assert.equal(h.proc.exitCode, 70, `fail-stop on unknown durability (${failed})`);
+      rmSync(flag, { force: true });
+      await sleep(200);
+      const again = decorate(await boot({}, {}, h.dir));
+      try {
+        assert.equal(audit(again).filter((x) => x.method === 'droid.add_user_message').length, 0, 'the turn was never submitted');
+        const found = await call(again, 'droid_find_sessions', {});
+        for (const s of found.sessions) assert.notEqual(s.latestRun.state, 'running');
+        // The same intent is a replay of whatever recovery decided; a fresh key starts clean.
+        const fresh = await again.create('fsync-b', 'normal', { workspace: again.ws('fsync-b') });
+        assert.equal((await again.settle([fresh.metadata.session])).sessions[0].latestRun.state, 'succeeded');
+      } finally { await done(again); }
+    } finally { rmSync(flag, { force: true }); rmSync(h.dir, { recursive: true, force: true }); }
+  });
+
   await t.test('a rejected admission does not block later queued turns', async () => {
     const h = await fixture({ maxConcurrentRuns: 1 });
     try {
@@ -895,6 +951,7 @@ test('adversarial fixes: unexpected worker death, default-deny aliases, admissio
     await refuse((s) => { Object.values(s.runs)[0].createdAt = '2026-10-01T00:00:00+25:00'; }, /createdAt/);
     await refuse((s) => { const copy = { ...Object.values(s.runs)[0], runId: randomUUID() }; s.runs[copy.runId] = copy; }, /duplicate requestKey/);
     await refuse((s) => { s.sessions[run.sessionId].droidSessionId = randomUUID(); }, /different from its controller session/);
+    await refuse((s) => { s.sessions[run.sessionId].droidSessionId = null; }, /different from its controller session/);
     // A pre-existing backup is kept and THIS migration's preimage is retained under its own name.
     const v2 = { version: 2, host: good.host, home: good.home, factoryHomeOverride: good.factoryHomeOverride, sessionHeads: { [run.droidSessionId]: run.runId }, runs: { [run.runId]: (({ sessionId, replyTo, disposition, preview, submittedAt, ...rest }) => rest)(run) } };
     const v2Bytes = JSON.stringify(v2);
@@ -910,7 +967,7 @@ test('adversarial fixes: unexpected worker death, default-deny aliases, admissio
     const resultPath = join(h.dir, 'state', `${run.runId}.result.json`);
     const result = JSON.parse(readFileSync(resultPath, 'utf8'));
     const crashed = structuredClone(good); Object.values(crashed.runs)[0].state = 'running'; writeFileSync(path, JSON.stringify(crashed));
-    writeFileSync(resultPath, JSON.stringify({ sessionId: result.sessionId, subtype: 'success' }));
+    writeFileSync(resultPath, JSON.stringify({ sessionId: result.sessionId, subtype: 'success', success: true, messages: [], text: '' }));
     const again = decorate(await boot({}, {}, h.dir));
     try {
       const status = await call(again, 'droid_get_session_status', { session: a.metadata.session });
