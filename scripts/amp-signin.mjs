@@ -9,8 +9,8 @@
 // prints AUTH_URL_READY. The owner opens it and consents. The browser then lands on
 // a http://127.0.0.1:<port>/callback page that fails to load: the owner copies that
 // full URL into DIR/callback-url.txt (mode 600). The script delivers it to the local
-// callback listener and waits for Factory to report completion. A link lasts five
-// minutes; the script reissues a new one (same file) up to three times.
+// callback listener and waits for Factory to report completion. A link lasts 240 seconds;
+// the script reissues a new one (same file) up to three times.
 import { parseArgs } from 'node:util';
 import { readFileSync, writeFileSync, existsSync, rmSync, mkdirSync, statSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';

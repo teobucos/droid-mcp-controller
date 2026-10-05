@@ -31,7 +31,7 @@ no task); detached sessions are unaffected.
 3. The owner opens the link, approves, and copies the failing
    `http://127.0.0.1:54621/callback?...` address back; place it in `<dir>/callback-url.txt` (600).
    The helper delivers it to Factory's own loopback listener. Tokens and the code are never
-   printed or logged. Links last 5 minutes; the helper reissues up to three times.
+   printed or logged. Links last 240 seconds (Factory's window); the helper reissues up to three times, so have the owner ready.
 4. Verify: only `mcp-oauth.v2.file` changed (the other two hashes are identical); the live URL's
    entry is unchanged (the file is encrypted: compare that the previous bytes are still present
    as a block, or re-run a detached smoke against the old service and watch it still work);
