@@ -9,9 +9,17 @@ const TEXT = 16000;
 const DEFAULT_CODE = { failed: 'run_failed', timed_out: 'timed_out', unknown: 'unknown_outcome' };
 const DEFAULT_MESSAGE = { failed: 'The turn failed.', timed_out: 'The turn exceeded the run timeout.', unknown: 'The turn outcome is unknown.' };
 
+// SDK, server and OS text can embed ids, paths and URLs (including OAuth fragments).
+// New tools return a scrubbed message; raw text stays in local state and legacy views.
+const scrub = (text) => text
+  .replace(/https?:\/\/\S+/g, '<url>')
+  .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<id>')
+  .replace(/(?:\/[\w.@~+-]+){2,}/g, '<path>')
+  .replace(/[\u0000-\u001f]+/g, ' ');
+
 export function runError(run) {
   if (WORKING.has(run.state) || (!run.error && !DEFAULT_CODE[run.state])) return null;
-  return describeError(run.errorCode ?? DEFAULT_CODE[run.state] ?? 'run_failed', (run.error ?? DEFAULT_MESSAGE[run.state]).slice(0, 500));
+  return describeError(run.errorCode ?? DEFAULT_CODE[run.state] ?? 'run_failed', scrub(run.error ?? DEFAULT_MESSAGE[run.state]).slice(0, 500));
 }
 
 // Observed agent-side report: this controller cannot send for the agent, so it
@@ -68,6 +76,14 @@ export function resultMessages(run, result) {
     else if (m.type === 'error') out.push({ id, runId: run.runId, role: 'controller', type: 'error', ...clip(String(m.message ?? 'error')) });
   });
   return out;
+}
+
+// Questions and declined permissions are controller facts about a turn, kept in history
+// after the head moves on, so a later follow-up cannot hide them.
+export function turnNotices(run) {
+  const notices = (run.questions ?? []).map((q, index) => ({ id: `${run.runId}:question:${index}`, runId: run.runId, role: 'controller', type: 'notice', ...clip(`Declined AskUser question: ${q.question}${q.options.length ? ` [options: ${q.options.join(' | ')}]` : ''}`) }));
+  if (run.permissionsDeclined) notices.push({ id: `${run.runId}:permissions`, runId: run.runId, role: 'controller', type: 'notice', ...clip(`${run.permissionsDeclined} tool permission request(s) were declined by policy`) });
+  return notices;
 }
 
 export function noticeMessage(run, text) {

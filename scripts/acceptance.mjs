@@ -2,7 +2,7 @@
 // real Factory models through the real session tools. Run it only against an
 // instance started with its own port, token and state directory.
 //   node scripts/acceptance.mjs --instance DIR --out evidence.json --reply-to T-... \
-//        [--luna gpt-6-luna] [--haiku claude-haiku-4-5-20251001] [--sonnet claude-sonnet-5-5]
+//        [--routed] [--luna gpt-6-luna] [--haiku claude-haiku-4-5-20251001] [--sonnet claude-sonnet-5-5]
 // DIR holds config.json, token and service.log of that instance.
 import { parseArgs } from 'node:util';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
-const { values } = parseArgs({ options: { instance: { type: 'string' }, out: { type: 'string' }, 'reply-to': { type: 'string' }, luna: { type: 'string', default: 'gpt-6-luna' }, haiku: { type: 'string', default: 'claude-haiku-4-5-20251001' }, sonnet: { type: 'string', default: 'claude-sonnet-5-5' } } });
+const { values } = parseArgs({ options: { instance: { type: 'string' }, out: { type: 'string' }, 'reply-to': { type: 'string' }, luna: { type: 'string', default: 'gpt-6-luna' }, haiku: { type: 'string', default: 'claude-haiku-4-5-20251001' }, sonnet: { type: 'string', default: 'claude-sonnet-5-5' }, routed: { type: 'boolean', default: false } } });
 if (!values.instance || !values.out) throw new Error('Usage: node scripts/acceptance.mjs --instance DIR --out FILE [--reply-to T-...]');
 const config = JSON.parse(readFileSync(join(values.instance, 'config.json'), 'utf8'));
 if (!/\/accept/.test(values.instance) && !process.env.ACCEPTANCE_ALLOW_ANY_DIR) throw new Error('Refusing to run: instance directory must be a dedicated acceptance instance');
@@ -124,6 +124,32 @@ try {
   check('p5', 'archive hides, archived:true shows', hidden.sessions.length === 0 && shown.sessions.length === 1);
   const total = await call('droid_get_usage', {});
   check('p5', 'global usage aggregates all turns', total.turns >= 13 && total.tokens.outputTokens > 0, { turns: total.turns });
+  // P6: everything again with replyTo set on EVERY session: concurrency, queueing, steering.
+  if (replyTo && values.routed) {
+    const report6 = (tag) => `Send exactly one message to Puck with your Puck messaging tool saying "ACCEPTANCE TEST ONLY, no action needed: ${tag}". Then reply exactly ${tag.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_DONE.`;
+    const tags = [0, 1, 2, 3].map((i) => `routed-${RUN}-${i}`);
+    const models6 = [values.luna, values.haiku, values.sonnet, values.haiku];
+    const p6 = [];
+    for (const [i, tag] of tags.entries()) p6.push(await create(`routed-${i}`, `p6-${i}`, models6[i], report6(tag), { replyTo }));
+    let peak6 = 0;
+    const sampler6 = setInterval(async () => { try { peak6 = Math.max(peak6, (await call('droid_list_workspaces', {})).capacity.active); } catch {} }, 250);
+    const done6 = await join_(p6.map(sid));
+    clearInterval(sampler6);
+    check('p6', '4 routed sessions were concurrent (peak active >= 3)', peak6 >= 3, { peakActive: peak6 });
+    check('p6', 'every routed session succeeded and its own recipient is the Puck thread', done6.every((s) => s.latestRun.state === 'succeeded' && s.metadata.replyTo === replyTo), done6.map((s) => s.latestRun.state));
+    check('p6', 'every routed session has an accepted agent-origin report', done6.every((s) => s.notification.state === 'accepted'), done6.map((s) => s.notification.state));
+    check('p6', 'no routed session needs attention', done6.every((s) => !s.latestRun.needsAttention), done6.map((s) => s.latestRun.permissionsDeclined));
+    // Routed steering and queueing.
+    const routedSteer = await create('routed-steer', 'p6-steer', values.haiku, ESSAY(3000), { replyTo });
+    await running(sid(routedSteer));
+    const q = await call('droid_send_message', { session: sid(routedSteer), requestKey: `rq-${randomUUID()}`, message: 'Reply exactly ROUTED_QUEUED_OK. Do not use tools.', model: values.haiku, reasoningEffort: 'low' });
+    check('p6', 'routed session queues by default', q.disposition === 'queued');
+    const st = await call('droid_send_message', { session: sid(routedSteer), requestKey: `rs-${randomUUID()}`, message: report6(`steered-${RUN}`), model: values.haiku, reasoningEffort: 'low', interrupt: true });
+    check('p6', 'routed session steers with interrupt:true', st.disposition === 'interrupting');
+    const [d6] = await join_([sid(routedSteer)]);
+    check('p6', 'steered routed turn reported to Puck and kept its recipient', d6.latestRun.state === 'succeeded' && d6.notification.state === 'accepted' && d6.metadata.replyTo === replyTo, { state: d6.latestRun.state, notification: d6.notification.state });
+    report.markersSentToPuck = [...tags, `steered-${RUN}`, 'reply-back session in p1'];
+  }
   report.blocked = Object.values(report.phases).flat().filter((c) => c.blocked).map((c) => ({ name: c.name, because: c.blocked }));
   report.passed = Object.values(report.phases).every((phase) => phase.every((c) => c.ok || c.blocked));
 } catch (error) {

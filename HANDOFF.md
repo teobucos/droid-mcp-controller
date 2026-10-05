@@ -267,7 +267,7 @@ browser success page.
 
 Controller SDK injection supplies the same connection on create/resume in every
 approved cwd, so no edits to application repositories are needed. The controller's preflight verifies, before any task prompt, that
-`listTools` returns `amp-puck___puck` allowed and `amp-puck___manage_amp` denied.
+`listTools` returns `amp-puck___puck` allowed and only `puck` usable (every other Amp tool default-denied).
 This is model-context filtering, not a narrow OAuth security grant. The actual
 tool supports explicit `params.conversationID` and correlated `params.replyHandle`;
 the URL's threadID alone is not routing proof. Native AskUser is recorded

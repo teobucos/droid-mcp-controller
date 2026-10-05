@@ -14,7 +14,7 @@ import { EventEmitter } from 'node:events';
 import { approvedWorkspace, pathsOverlap, contains } from './config.mjs';
 import { ToolError } from './errors.mjs';
 import { openStore, atomicJson, defaultTitle, resultState, LIVE, WORKING } from './store.mjs';
-import { sessionStatus, isWorking, resultMessages, noticeMessage, legacyRun } from './views.mjs';
+import { sessionStatus, isWorking, resultMessages, noticeMessage, turnNotices, legacyRun } from './views.mjs';
 
 const levels = ['off', 'low', 'medium', 'high'];
 const MAX_QUEUED = 64;
@@ -22,6 +22,8 @@ const MAX_PENDING_PER_SESSION = 8;
 const now = () => new Date().toISOString();
 const sha = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const sum = (items, key) => items.reduce((total, item) => total + (item[key] ?? 0), 0);
+// A turn was submitted to Droid (or is known to have been) rather than dropped while queued.
+const submitted = (run) => Boolean(run.startedAt || run.droidSessionId || run.result);
 const conflicts = (a, b) => (a.autonomy !== 'off' || b.autonomy !== 'off') && pathsOverlap(a.workspace, b.workspace);
 
 function cursorOf(cursor) {
@@ -106,7 +108,9 @@ export class Controller {
   accept(intent) {
     const { kind, requestKey } = intent;
     const target = kind === 'send' ? this.session(intent.session) : null;
-    const workspace = target ? target.workspace : approvedWorkspace(this.config, intent.workspace);
+    // Resume re-authorizes the recorded workspace: roots can be revoked and symlinks can move.
+    const workspace = approvedWorkspace(this.config, target ? target.workspace : intent.workspace);
+    if (target && workspace !== target.workspace) throw new ToolError('workspace_not_approved', 'The session workspace no longer resolves to the directory it was created in');
     const dup = this.keys.has(requestKey) ? this.state.runs[this.keys.get(requestKey)] : null;
     // Replays retain their accepted defaults, including records predating per-turn settings.
     const autonomy = intent.autonomy ?? dup?.autonomy ?? this.config.defaultAutonomy;
@@ -115,7 +119,7 @@ export class Controller {
     const labels = intent.labels ? [...new Set(intent.labels)].sort() : [];
     const fingerprint = sha({
       kind, target: target?.sessionId ?? workspace, prompt: intent.prompt, autonomy, model: intent.model ?? null, reasoningEffort: reasoningEffort ?? null,
-      replyTo, interrupt: Boolean(intent.interrupt), title: intent.title ?? null, labels,
+      replyTo, interrupt: Boolean(intent.interrupt), title: intent.title ?? null, labels, continuesRun: intent.guard?.headRunId ?? null,
     });
     if (dup) {
       if (dup.fingerprint !== fingerprint) throw new ToolError('request_key_conflict', 'requestKey was already used with different arguments');
@@ -157,6 +161,8 @@ export class Controller {
     this.queue.push({ run, prompt: intent.prompt });
     if (disposition === 'interrupting') for (const live of runs.filter((item) => LIVE.has(item.state))) this.stopWorker(live, 'cancel');
     this.pump();
+    // "started" means admitted; a turn still waiting for capacity or a lock is queued.
+    if (run.disposition === 'started' && run.state === 'queued') { run.disposition = 'queued'; this.store.save(); }
     this.changes.emit('change');
     return run;
   }
@@ -172,10 +178,19 @@ export class Controller {
       const blocked = this.workers.size >= this.config.maxConcurrentRuns
         || blockers.some((other) => other.sessionId === run.sessionId || conflicts(other, run));
       if (blocked) remaining.push(item);
+      else if (!this.stillAuthorized(run)) this.reject(run, 'workspace_not_approved', 'The workspace is no longer approved or no longer resolves to the same directory; nothing was submitted.');
       else this.launch(run, item.prompt);
       blockers.push(run);
     }
     this.queue = remaining;
+  }
+
+  stillAuthorized(run) {
+    try { return approvedWorkspace(this.config, run.workspace) === run.workspace; } catch { return false; }
+  }
+  reject(run, code, message) {
+    Object.assign(run, { state: 'failed', errorCode: code, error: message, finishedAt: now() });
+    this.changed(run);
   }
 
   launch(run, prompt) {
@@ -355,7 +370,7 @@ export class Controller {
   usage({ session, after, before }) {
     if (after && before && Date.parse(after) >= Date.parse(before)) throw new ToolError('invalid_argument', 'after must be earlier than before');
     const runs = (session ? this.runsOf(this.session(session).sessionId) : Object.values(this.state.runs))
-      .filter((run) => (run.startedAt || run.result) && (!after || Date.parse(run.createdAt) >= Date.parse(after)) && (!before || Date.parse(run.createdAt) < Date.parse(before)));
+      .filter((run) => submitted(run) && (!after || Date.parse(run.createdAt) >= Date.parse(after)) && (!before || Date.parse(run.createdAt) < Date.parse(before)));
     const usages = runs.map((run) => this.tokenUsageOf(run)).filter(Boolean);
     const credits = usages.filter((usage) => typeof usage.factoryCredits === 'number');
     return {
@@ -371,12 +386,15 @@ export class Controller {
     const messages = [];
     let historyAvailable = true;
     for (const run of this.runsOf(id)) {
+      const before = messages.length;
       if (run.result) messages.push(...resultMessages(run, JSON.parse(readFileSync(this.store.resultPath(run.runId), 'utf8'))));
       else if (WORKING.has(run.state)) { if (run.preview) messages.push({ id: `${run.runId}:partial`, runId: run.runId, role: 'assistant', type: 'message', text: run.preview, truncated: false }); }
-      else if (run.startedAt) {
+      else if (submitted(run)) {
         historyAvailable = false;
+        if (run.preview) messages.push({ id: `${run.runId}:partial`, runId: run.runId, role: 'assistant', type: 'message', text: run.preview, truncated: false });
         messages.push(noticeMessage(run, `No transcript was retained for this turn (${run.state}).`));
       }
+      if (messages.length > before || run.questions?.length || run.permissionsDeclined) messages.push(...turnNotices(run));
     }
     return {
       metadata: this.status(id).metadata, messages: messages.slice(offset, offset + limit),

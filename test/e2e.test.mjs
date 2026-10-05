@@ -617,7 +617,7 @@ test('legacy aliases: explicit recipient, generic Amp MCP attachment and admin f
     for (const method of ['droid.initialize_session', 'droid.load_session']) {
       const params = wire.find((r) => r.method === method).params;
       assert.deepEqual(params.mcpServers, [{ name: 'amp-puck', type: 'http', url, headers: [], oauth: { resource: 'https://ampcode.com/mcp' } }]);
-      assert.deepEqual(params.disabledToolIds, ['amp-puck___manage_amp']);
+      assert.deepEqual(params.disabledToolIds, ['amp-puck___manage_amp', 'amp-puck___find_thread', 'amp-puck___read_thread']);
     }
     const turns = wire.filter((r) => r.method === 'droid.add_user_message');
     for (const [index, run] of [first, next].entries()) {

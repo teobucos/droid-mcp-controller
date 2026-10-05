@@ -62,6 +62,9 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     case 'droid.list_mcp_tools':
       reply(req, { tools: [] }); break;
     case 'droid.list_mcp_servers':
+      if (process.env.MOCK_PUCK_FAILURE === 'leaky') {
+        reply(req, { servers: [{ name: 'amp-puck', status: 'failed', error: 'boom 11111111-2222-4333-8444-555555555555 at /home/box/.factory/private/x https://example.invalid/cb#state=SECRETSTATE', source: 'project', isManaged: false, serverType: 'http', requiresAuth: true, hasAuthTokens: true }], summary: { total: 1, connected: 0, connecting: 0, failed: 1 } }); break;
+      }
       if (process.env.MOCK_PUCK_FAILURE === 'unlisted') { reply(req, { servers: [], summary: { total: 0, connected: 0, connecting: 0, failed: 0 } }); break; }
       if (process.env.MOCK_PUCK_FAILURE === 'archived') {
         reply(req, { servers: [{ name: 'amp-puck', status: 'failed', error: 'Error POSTing to endpoint: {"error":"This thread is archived"}', source: 'project', isManaged: false, serverType: 'http', requiresAuth: true, hasAuthTokens: true }], summary: { total: 1, connected: 0, connecting: 0, failed: 1 } }); break;
@@ -71,7 +74,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (['archived', 'unlisted'].includes(process.env.MOCK_PUCK_FAILURE)) {
         send({ ...envelope('response'), id: req.id, error: { code: -32000, message: 'Unknown tool identifier(s): amp-puck___manage_amp' } }); break;
       }
-      reply(req, { tools: ['puck', 'manage_amp'].filter((name) => process.env.MOCK_PUCK_FAILURE !== 'unauthenticated' && !(name === 'puck' && process.env.MOCK_PUCK_FAILURE === 'puck-missing')).map((name) => ({ id: `amp-puck___${name}`, llmId: `amp-puck___${name}`, displayName: name, description: name, category: 'read', defaultAllowed: true, currentlyAllowed: name === 'puck' || process.env.MOCK_PUCK_FAILURE === 'admin-allowed' || !settings.disabledToolIds?.includes(`amp-puck___${name}`) })) }); break;
+      reply(req, { tools: ['puck', 'manage_amp', 'find_thread', 'read_thread', ...(['new-tool', 'undeniable'].includes(process.env.MOCK_PUCK_FAILURE) ? ['brand_new_tool'] : [])].filter((name) => process.env.MOCK_PUCK_FAILURE !== 'unauthenticated' && !(name === 'puck' && process.env.MOCK_PUCK_FAILURE === 'puck-missing')).map((name) => ({ id: `amp-puck___${name}`, llmId: `amp-puck___${name}`, displayName: name, description: name, category: 'read', defaultAllowed: true, currentlyAllowed: name === 'puck' || process.env.MOCK_PUCK_FAILURE === 'admin-allowed' || (process.env.MOCK_PUCK_FAILURE === 'undeniable' && name === 'brand_new_tool') || !settings.disabledToolIds?.includes(`amp-puck___${name}`) })) }); break;
     case 'droid.add_user_message':
       turnId = p.messageId; const text0 = p.text; prompt = p.text.split('\n\n[Controller coordination context]')[0]; reply(req, {});
       const now = Date.now();
@@ -102,6 +105,11 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         const at = Date.now();
         notify({ type: 'create_message', message: { id: randomUUID(), role: 'assistant', content: [{ type: 'tool_use', id: toolUseId, name: 'amp-puck___puck', input: { action: 'send', params: { conversationID: recipient, message: 'mock report' } } }], createdAt: at, updatedAt: at } });
         notify({ type: 'tool_result', messageId: randomUUID(), toolUseId, content: prompt.startsWith('puck-error') ? 'rejected' : 'accepted', isError: prompt.startsWith('puck-error') });
+        if (prompt === 'puck-report-read') {
+          const readId = randomUUID();
+          notify({ type: 'create_message', message: { id: randomUUID(), role: 'assistant', content: [{ type: 'tool_use', id: readId, name: 'amp-puck___puck', input: { action: 'read_reply', params: { replyHandle: 'handle-1' } } }], createdAt: at, updatedAt: at } });
+          notify({ type: 'tool_result', messageId: randomUUID(), toolUseId: readId, content: 'no reply yet', isError: false });
+        }
       }
       if (!prompt.startsWith('no-echo:')) text(`progress:${prompt}`);
       timer = setTimeout(() => {

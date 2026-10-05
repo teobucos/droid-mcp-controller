@@ -141,10 +141,12 @@ test('session lifecycle: create, status, read, send, steer, cancel, update, find
   await t.test('no Factory/Droid session UUID, fingerprint or prompt leaks through any new tool', async () => {
     const droidId = readState(h).sessions[a].droidSessionId;
     assert.match(droidId, /^[0-9a-f-]{36}$/);
-    const outputs = [await h.status(a), await call(h, 'droid_read_session', { session: a }), await call(h, 'droid_find_sessions', {}), await call(h, 'droid_wait_for_sessions', { sessions: [a], timeoutSeconds: 0 }), await call(h, 'droid_get_usage', { session: a })];
+    // The mock echoes ordinary prompts as assistant output; a no-echo prompt isolates real retention.
+    const quiet = await h.create('leak-quiet', 'no-echo:LEAK_MARKER_9', { title: 'Quiet' });
+    await h.settle([quiet.metadata.session]);
+    const outputs = [await h.status(a), await call(h, 'droid_read_session', { session: a }), await call(h, 'droid_find_sessions', {}), await call(h, 'droid_wait_for_sessions', { sessions: [a, quiet.metadata.session], timeoutSeconds: 0 }), await call(h, 'droid_get_usage', { session: a }), await call(h, 'droid_read_session', { session: quiet.metadata.session })];
     const text = JSON.stringify(outputs);
-    for (const secret of [droidId, 'fingerprint', 'droidSessionId', 'stderrTail', 'textTail']) assert.ok(!text.includes(secret), secret);
-    assert.ok(!text.includes('sleep:400 first') || text.includes('answer:sleep:400 first'), 'prompt text itself is not retained');
+    for (const secret of [droidId, 'fingerprint', 'droidSessionId', 'stderrTail', 'textTail', 'LEAK_MARKER_9']) assert.ok(!text.includes(secret), secret);
   });
 
   await t.test('read paginates, never fabricates the user prompt, and rejects bad cursors', async () => {
@@ -457,7 +459,7 @@ test('reply-back: per-session recipient, generic endpoint, misroute detection, p
     for (const init of inits) {
       assert.deepEqual(init.params.mcpServers, [{ name: 'amp-puck', type: 'http', url: AMP_URL, headers: [], oauth: { resource: 'https://ampcode.com/mcp' } }]);
       assert.ok(!JSON.stringify(init.params).includes('threadID'), 'endpoint is never bound to a thread');
-      assert.deepEqual(init.params.disabledToolIds, ['amp-puck___manage_amp'], 'admin tool stays denied');
+      assert.deepEqual(init.params.disabledToolIds, ['amp-puck___manage_amp', 'amp-puck___find_thread', 'amp-puck___read_thread'], 'admin and thread-reading tools stay denied');
     }
     for (const [i, replyTo] of recipients.entries()) {
       const turn = h.turns('puck-report').find((x) => x.params.text.includes(replyTo));
@@ -465,6 +467,7 @@ test('reply-back: per-session recipient, generic endpoint, misroute detection, p
       for (const other of recipients.filter((r) => r !== replyTo)) assert.ok(!turn.params.text.includes(other), 'no recipient bleed between sessions');
       assert.ok(turn.params.text.includes(created[i].metadata.session) && turn.params.text.includes(created[i].latestRun.runId));
       assert.match(turn.params.text, /amp-puck___puck/);
+      assert.match(turn.params.text, /pre-approved/);
     }
   });
 
@@ -530,6 +533,8 @@ test('preflight: actionable Amp MCP failures replace the masked unknown-tool err
   const cases = [
     ['archived', 'amp_mcp_unreachable', /archived/i],
     ['unlisted', 'amp_mcp_not_started', /OAuth|sign-in|endpoint URL/i],
+    ['undeniable', 'amp_mcp_admin_tool_exposed', /could not be denied/],
+    ['leaky', 'amp_mcp_unreachable', /failed/],
     ['unauthenticated', 'amp_mcp_auth_required', /authoriz|sign/i],
     ['puck-missing', 'amp_mcp_tool_missing', /puck/],
     ['admin-allowed', 'amp_mcp_admin_tool_exposed', /manage_amp|admin/i],
@@ -547,6 +552,7 @@ test('preflight: actionable Amp MCP failures replace the masked unknown-tool err
         assert.ok(status.latestRun.error.action.length > 10);
         assert.equal(audit(h).filter((x) => x.method === 'droid.add_user_message').length, 0, 'no task prompt is submitted');
         assert.ok(!JSON.stringify(status).includes('pendingAuth'));
+        assert.ok(!/11111111-2222|\/home\/box|SECRETSTATE|example\.invalid/.test(JSON.stringify(status)), 'no ids, paths or OAuth state from server text');
         const detached = await h.create(`pre-${mode}-detached`, 'normal', { replyTo: null });
         assert.equal((await h.settle([detached.metadata.session])).sessions[0].latestRun.state, 'succeeded', 'detached work does not depend on the Amp endpoint');
       } finally { await done(h); }
@@ -612,6 +618,9 @@ test('durability: v2 migration with retained backup, restart, crash fail-closed,
       const unknownSession = state.runs[r4.runId].sessionId;
       const status = await call(h, 'droid_get_session_status', { session: unknownSession });
       assert.equal(status.agentState.state, 'unknown');
+      const hist = await call(h, 'droid_read_session', { session: unknownSession });
+      assert.equal(hist.historyAvailable, false, 'a migrated turn without a transcript is not advertised as complete');
+      assert.ok(hist.messages.some((m) => m.type === 'notice' && /No transcript/.test(m.text)));
       assert.equal((await call(h, 'droid_wait_for_sessions', { sessions: [unknownSession], timeoutSeconds: 0 })).settled, true);
       await rejectsWith(call(h, 'droid_send_message', { session: unknownSession, requestKey: 'u', message: 'x', model: 'mock-model' }), 'session_unknown_outcome');
       await assert.rejects(call(h, 'droid_continue', { runId: r4.runId, requestKey: 'u2', prompt: 'x' }), /unknown|reconcile/i);
@@ -674,7 +683,111 @@ test('aliases: the seven legacy tools are thin views over the session core', asy
     await call(h, 'droid_cancel', { runId: run.runId });
     await h.settle([readState(h).runs[run.runId].sessionId]);
     const next = await call(h, 'droid_continue', { runId: run.runId, requestKey: 'alias-3c', prompt: 'follow' });
-    assert.equal(next.droidSessionId, run.droidSessionId ?? next.droidSessionId);
-    assert.equal(readState(h).runs[next.runId].sessionId, readState(h).runs[run.runId].sessionId);
+    const sessionId = readState(h).runs[run.runId].sessionId;
+    assert.equal(readState(h).runs[next.runId].sessionId, sessionId);
+    await h.settle([sessionId]);
+    const droidId = readState(h).sessions[sessionId].droidSessionId;
+    assert.match(droidId, /^[0-9a-f-]{36}$/);
+    assert.equal(audit(h).filter((x) => x.method === 'droid.load_session').at(-1).params.sessionId, droidId, 'the continuation resumed the first turn\'s Droid session');
+  });
+});
+
+test('review fixes: default-deny, revoked workspace, scrubbing, reporting, migration and pagination hardening', async (t) => {
+  await t.test('a brand-new Amp tool is denied automatically; an undeniable one fails the run closed', async () => {
+    const h = await fixture({ ampMcp: { url: AMP_URL } }, { MOCK_PUCK_FAILURE: 'new-tool' });
+    try {
+      const s = await h.create('deny-new', 'normal', { replyTo: PUCK });
+      assert.equal((await h.settle([s.metadata.session])).sessions[0].latestRun.state, 'succeeded');
+      const wire = audit(h);
+      const update = wire.find((x) => x.method === 'droid.update_session_settings' && x.params.disabledToolIds);
+      assert.ok(update.params.disabledToolIds.includes('amp-puck___brand_new_tool'), 'the unknown tool is added to the deny list');
+      assert.ok(!update.params.disabledToolIds.includes('amp-puck___puck'));
+      assert.ok(update.ts <= wire.find((x) => x.method === 'droid.add_user_message').ts, 'denied before the prompt is submitted');
+    } finally { await done(h); }
+  });
+
+  await t.test('resume re-authorizes the recorded workspace before touching Droid', async () => {
+    const h = await fixture();
+    const s = await h.create('revoke-a', 'normal');
+    await h.settle([s.metadata.session]);
+    const loads = audit(h).filter((x) => x.method === 'droid.load_session').length;
+    await stop(h);
+    const again = decorate(await boot({ approvedDirectories: [join(h.dir, 'workspace-sibling')] }, {}, h.dir));
+    try {
+      await rejectsWith(again.send(s.metadata.session, 'revoke-b', 'x'), 'workspace_not_approved');
+      assert.equal(audit(again).filter((x) => x.method === 'droid.load_session').length, loads, 'Droid never started in the revoked workspace');
+    } finally { await done(again); }
+  });
+
+  await t.test('read_reply never fabricates a misroute; history keeps declined questions and permissions', async () => {
+    const h = await fixture({ ampMcp: { url: AMP_URL } });
+    try {
+      const s = await h.create('readreply', 'puck-report-read', { replyTo: PUCK });
+      const status = (await h.settle([s.metadata.session])).sessions[0];
+      assert.equal(status.notification.state, 'accepted');
+      assert.equal(status.notification.error, null);
+      const asked = await h.create('ask-history', 'ask', { autonomy: 'high', workspace: h.ws('ask-h') });
+      await h.settle([asked.metadata.session]);
+      await h.send(asked.metadata.session, 'ask-history-2', 'normal', { autonomy: 'high' });
+      await h.settle([asked.metadata.session]);
+      const history = await call(h, 'droid_read_session', { session: asked.metadata.session, limit: 100 });
+      assert.ok(history.messages.some((m) => m.role === 'controller' && /Declined AskUser question: Deploy\?/.test(m.text)), 'the question survives a later turn');
+    } finally { await done(h); }
+  });
+
+  await t.test('dates need a real UTC offset; admitted vs queued disposition; legacy continue fingerprints the parent', async () => {
+    const h = await fixture({ maxConcurrentRuns: 1 });
+    try {
+      for (const bad of ['2026-10-01T00:00:00+25:00', '2026-10-01T00:00:00+00:99']) {
+        await rejectsWith(call(h, 'droid_find_sessions', { after: bad }), 'invalid_argument');
+        await rejectsWith(call(h, 'droid_get_usage', { before: bad }), 'invalid_argument');
+      }
+      const idle = await h.create('disp-idle', 'normal', { workspace: h.ws('disp-a') });
+      await h.settle([idle.metadata.session]);
+      const busy = await h.create('disp-busy', 'sleep:700 busy', { workspace: h.ws('disp-b') });
+      const sent = await h.send(idle.metadata.session, 'disp-send', 'later');
+      assert.equal(sent.status.latestRun.state, 'queued');
+      assert.equal(sent.disposition, 'queued', 'a turn waiting for capacity is not "started"');
+      assert.equal((await h.send(idle.metadata.session, 'disp-send', 'later')).disposition, 'queued', 'replays keep it');
+      await h.settle([busy.metadata.session, idle.metadata.session]);
+      // Legacy continuation: same key from a different parent is a different intent.
+      const a = await call(h, 'droid_start', { requestKey: 'lc-a', prompt: 'normal', workspace: h.ws('lc') });
+      await h.settle([readState(h).runs[a.runId].sessionId]);
+      const b = await call(h, 'droid_continue', { runId: a.runId, requestKey: 'lc-k', prompt: 'next' });
+      await h.settle([readState(h).runs[b.runId].sessionId]);
+      assert.equal((await call(h, 'droid_continue', { runId: a.runId, requestKey: 'lc-k', prompt: 'next' })).runId, b.runId, 'identical retry from the original parent');
+      await assert.rejects(call(h, 'droid_continue', { runId: b.runId, requestKey: 'lc-k', prompt: 'next' }), /different/i);
+    } finally { await done(h); }
+  });
+
+  await t.test('corrupt state is refused without rewriting: bad legacy timestamps, duplicate session sequence numbers', async () => {
+    const h = await fixture();
+    const s1 = await h.create('seq-1', 'normal');
+    const s2 = await h.create('seq-2', 'normal', { workspace: h.ws('seq2') });
+    await h.settle([s1.metadata.session, s2.metadata.session]);
+    await stop(h);
+    const path = join(h.dir, 'state/state.json');
+    const good = JSON.parse(readFileSync(path, 'utf8'));
+    const dup = structuredClone(good);
+    const [first, second] = Object.values(dup.sessions);
+    second.seq = first.seq;
+    writeFileSync(path, JSON.stringify(dup));
+    await assert.rejects(boot({}, {}, h.dir), /sequence/);
+    assert.equal(readFileSync(path, 'utf8'), JSON.stringify(dup));
+    const lowNext = structuredClone(good); lowNext.nextSeq = 1;
+    writeFileSync(path, JSON.stringify(lowNext));
+    await assert.rejects(boot({}, {}, h.dir), /nextSeq/);
+    // v2 with an unparseable updatedAt must not be silently rewritten into invalid v3.
+    const v2 = { version: 2, host: good.host, home: good.home, factoryHomeOverride: good.factoryHomeOverride, sessionHeads: {}, runs: {} };
+    const run = Object.values(good.runs)[0];
+    const { sessionId, replyTo, disposition, preview, ...legacyRun } = run;
+    v2.runs[run.runId] = { ...legacyRun, updatedAt: 'not-a-timestamp' };
+    v2.sessionHeads[run.droidSessionId] = run.runId;
+    const bytes = JSON.stringify(v2);
+    writeFileSync(path, bytes);
+    await assert.rejects(boot({}, {}, h.dir), /updatedAt|Corrupt/);
+    assert.equal(readFileSync(path, 'utf8'), bytes);
+    assert.ok(!existsSync(`${path}.v2.bak`), 'no backup for a migration that was refused');
+    rmSync(h.dir, { recursive: true, force: true });
   });
 });

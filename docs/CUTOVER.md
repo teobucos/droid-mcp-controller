@@ -37,10 +37,17 @@ no task); detached sessions are unaffected.
    as a block, or re-run a detached smoke against the old service and watch it still work);
    a routed session on a second instance reaches `notification: accepted`. The grant scope is
    `email offline_access openid profile` (account-level, same as before).
-5. **Rollback of this step:** remove only the new per-URL entry. If Factory offers no
-   per-entry removal, restore the backed-up `mcp-oauth.v2.file` **only after** confirming the
-   hashes show nothing else wrote to it since, then re-run the verification. Also revoke the
-   grant from the Amp account if the owner wants it gone.
+5. **Rollback of this step:** restore the backed-up `mcp-oauth.v2.file` **only if no other
+   writer has touched it since** (compare its current hash with the one recorded right after the
+   sign-in), or revoke the grant in the Amp account. The credential file is encrypted and is
+   rewritten wholesale, so entry-level comparison is not possible and nothing is decrypted.
+   `auth.v2.file` (Factory's own login) may also change from routine token refresh; do not roll
+   it back.
+6. **Accepted residual risk, owner sign-off required before cutover.** The thread-free endpoint
+   exposes `puck`, `manage_amp`, `find_thread` and `read_thread` server-side with an account-level grant
+   (scope `email offline_access openid profile`). The controller enforces default-deny of everything
+   except `puck` on the client side (and fails the run closed if it cannot); this is not credential
+   scoping. Sign-off line: `owner: ____________  accepted on ____________`.
 
 ## 2. Back up controller state (controller stopped)
 

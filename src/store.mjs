@@ -62,6 +62,9 @@ function toV2(state) {
 // never obtained a Droid session UUID is its own session. Recorded routing is
 // preserved as that session's replyTo; nothing is retargeted.
 function toV3(state) {
+  for (const run of Object.values(state.runs)) {
+    for (const key of ['updatedAt', 'finishedAt']) if (run[key] !== undefined && !Number.isFinite(Date.parse(run[key]))) throw new Error(`Corrupt state: invalid ${key} on a run`);
+  }
   const sessions = {};
   const byDroid = new Map();
   let seq = 1;
@@ -124,11 +127,18 @@ export function openStore(config) {
       for (const run of Object.values(state.runs)) {
         if (run.droidSessionId && !state.sessionHeads[run.droidSessionId]) throw new Error('Corrupt state: missing session head');
       }
+      toV3(state);
+      persisted.parse(state); // The candidate must itself be valid before anything is written.
       // Validated: keep the pre-migration bytes next to the new state, never overwriting a backup.
       const backup = `${statePath}.v${loadedVersion}.bak`;
-      if (!existsSync(backup)) copyFileSync(statePath, backup, constants.COPYFILE_EXCL);
-      toV3(state);
+      if (!existsSync(backup)) { copyFileSync(statePath, backup, constants.COPYFILE_EXCL); const fd = openSync(backup, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); } }
     }
+    const seqs = new Set();
+    for (const session of Object.values(state.sessions)) {
+      if (seqs.has(session.seq)) throw new Error('Corrupt state: two sessions share a sequence number');
+      seqs.add(session.seq);
+    }
+    if (seqs.size && state.nextSeq <= Math.max(...seqs)) throw new Error('Corrupt state: nextSeq is not above every session sequence');
     const sessionOf = new Set();
     for (const [id, session] of Object.entries(state.sessions)) {
       if (id !== session.sessionId) throw new Error('Corrupt state: sessionId differs from record key');

@@ -140,7 +140,14 @@ Recipients are per session (`replyTo`) and are never defaulted.
 
 The controller attaches `amp-puck` through SDK `mcpServers` on create **and** resume,
 **only for routed sessions** (`replyTo` non-null); detached sessions never touch the
-endpoint. `disabledToolIds` fail-closed denies `amp-puck___manage_amp`.
+endpoint. Tool exposure is **default deny**: only `amp-puck___puck` (send, read_reply) is meant to be
+usable. The thread-free endpoint was observed live to offer `manage_amp` (admin) and
+`find_thread` / `read_thread` (read other Amp threads) too, so those start in
+`disabledToolIds`; the preflight then lists what the server actually exposes, denies every
+other `amp-puck___*` tool it finds (a new Amp tool is blocked automatically), and verifies
+none remains usable. If that cannot be achieved the run fails with
+`amp_mcp_admin_tool_exposed` and nothing is submitted. This is client-side filtering, **not**
+credential scoping (see docs/THREAT-MODEL.md). Detached sessions never touch the endpoint.
 
 **Factory stores Amp MCP OAuth tokens per exact endpoint URL** (observed live: the
 thread-free URL and a differently threaded URL both get `unauthorized` on a host that

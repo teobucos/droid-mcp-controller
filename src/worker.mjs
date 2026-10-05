@@ -2,7 +2,13 @@ import { createSession, resumeSession, ProcessTransport, ToolConfirmationOutcome
 import { approvedWorkspace } from './config.mjs';
 
 const PUCK_TOOL = 'amp-puck___puck';
-const DENIED_TOOLS = ['amp-puck___manage_amp'];
+// Default deny: only puck is wanted from the Amp endpoint. Observed live, the thread-free
+// external-agent endpoint also offers manage_amp (admin) and find_thread/read_thread (read other
+// Amp threads); these are denied up front. The preflight then lists what the server really
+// exposes, denies every other tool it finds (so a NEW Amp tool is blocked automatically) and
+// verifies none remains usable; if that cannot be achieved the run fails closed. This is
+// client-side filtering, not credential scoping.
+const DENIED_TOOLS = ['amp-puck___manage_amp', 'amp-puck___find_thread', 'amp-puck___read_thread'];
 let session;
 let cancelled = false;
 const abort = new AbortController();
@@ -19,8 +25,6 @@ process.on('disconnect', () => {
 class SetupError extends Error {
   constructor(code, message) { super(message); this.code = code; }
 }
-// Server errors can embed URLs with OAuth state; keep text, drop queries, bound length.
-const clean = (text = '') => String(text).replace(/(https?:\/\/[^\s"'?]+)\?[^\s"']*/g, '$1').replace(/[\u0000-\u001f]+/g, ' ').slice(0, 300);
 
 const withTimeout = (promise, ms) => Promise.race([promise, new Promise((_, reject) => setTimeout(() => reject(new Error('timed out')), ms))]);
 
@@ -33,7 +37,8 @@ async function preflightAmpMcp() {
     const server = (await session.listMcpServers().catch(() => ({ servers: [] }))).servers.find((item) => item.name === 'amp-puck');
     if (server?.requiresAuth && !server.hasAuthTokens) throw new SetupError('amp_mcp_auth_required', 'The Amp MCP requires authorization that this host has not completed');
     if (server?.status === 'connecting') { await new Promise((resolve) => setTimeout(resolve, 1000)); continue; }
-    if (server && server.status !== 'connected') throw new SetupError('amp_mcp_unreachable', `The Amp MCP server is ${server.status}${server.error ? `: ${clean(server.error)}` : ''}`);
+    if (server && server.status !== 'connected') // Raw server text can carry ids, paths and OAuth state: report only recognised causes.
+      throw new SetupError('amp_mcp_unreachable', `The Amp MCP server is ${server.status}${/archived/i.test(server.error ?? '') ? ' (the endpoint reports an archived thread)' : /unauthori[sz]ed|401/i.test(server.error ?? '') ? ' (the endpoint rejected the credentials)' : ''}`);
     if (!server) {
       // Observed live: an injected server that fails to start (no stored OAuth token for
       // this exact URL, a rejected connection) is dropped from the listing instead of
@@ -44,13 +49,18 @@ async function preflightAmpMcp() {
         throw new SetupError('amp_mcp_not_started', 'The amp-puck MCP server did not start: it is not registered with Droid');
       }
     }
-    let tools;
-    try { tools = await withTimeout(session.listTools(), 15000); } catch (error) {
-      throw new SetupError('amp_mcp_setup_failed', `MCP tool discovery failed: ${clean(error.message)}`);
+    const list = async () => {
+      try { return await withTimeout(session.listTools(), 15000); } catch (error) {
+        throw new SetupError('amp_mcp_setup_failed', /timed out/.test(error.message) ? 'MCP tool discovery timed out' : 'MCP tool discovery failed');
+      }
+    };
+    const others = (all) => all.filter((tool) => tool.id.startsWith('amp-puck___') && tool.id !== PUCK_TOOL);
+    let tools = await list();
+    if (others(tools).some((tool) => tool.allowed)) {
+      await session.updateSettings({ disabledToolIds: [...new Set([...DENIED_TOOLS, ...others(tools).map((tool) => tool.id)])] }).catch(() => {});
+      tools = await list();
     }
-    if (tools.some((tool) => tool.id.startsWith('amp-puck___') && tool.id !== PUCK_TOOL && tool.allowed)) {
-      throw new SetupError('amp_mcp_admin_tool_exposed', 'The Amp MCP exposes a tool other than puck to the agent');
-    }
+    if (others(tools).some((tool) => tool.allowed)) throw new SetupError('amp_mcp_admin_tool_exposed', 'The Amp MCP exposes a tool other than puck to the agent and it could not be denied');
     if (tools.some((tool) => tool.id === PUCK_TOOL && tool.allowed)) return;
     // A server that is registered but lacks puck is definitive; an unlisted one may still be registering.
     if (server) throw new SetupError('amp_mcp_tool_missing', 'The Amp MCP is connected but does not expose the puck tool');
@@ -85,9 +95,10 @@ process.on('message', async (msg) => {
   });
   // The agent speaks to Puck through the Amp MCP itself. Record what it did, not what it claims.
   const observe = (message) => {
-    if (message.type === 'tool_call' && message.name === PUCK_TOOL) {
+    // Only sends are reports. read_reply carries no recipient and says nothing about routing.
+    if (message.type === 'tool_call' && message.name === PUCK_TOOL && message.input?.action === 'send') {
       toolNames.set(message.toolUseId, message.input?.params?.conversationID);
-      if (message.input?.action === 'send' && message.input?.params?.conversationID !== run.replyTo) {
+      if (message.input?.params?.conversationID !== run.replyTo) {
         void send({ kind: 'reply', state: 'failed', code: 'reply_misrouted', message: 'The agent sent a report to a conversation other than replyTo' }).catch(() => {});
       }
     } else if (message.type === 'tool_result' && toolNames.has(message.toolUseId)) {
@@ -145,7 +156,7 @@ process.on('message', async (msg) => {
       await preflightAmpMcp();
       if (cancelled) throw new Error('Cancelled before turn submission');
       await event({ type: 'puck_mcp_ready', tool: PUCK_TOOL });
-      submitted += `\n\n[Controller coordination context]\nPuck owns orchestration. Use the actual Amp MCP tool amp-puck___puck; never manage_amp or Amp CLI messaging. Explicit recipient conversationID: ${run.replyTo}. Controller sessionId: ${run.sessionId}. Controller runId: ${run.runId}. Include these handles and any task marker in reports/questions. When reporting or asking Puck, call {action:"send",params:{conversationID:"${run.replyTo}",message:"your concise report or actual question"}}. If a reply is needed and send returns queued/working, use {action:"read_reply",params:{replyHandle:"the handle returned by send"}}; retry reads, never duplicate sends or use latest-active routing. Do not claim delivery from mere acceptance. If a reply cannot be retrieved, report the blocker and end this turn; Puck can send a follow-up message to this session after it settles. Never guess AskUser answers. MCP failures must appear in your final result. High autonomy grants existing service-user access, not root privileges, another user's workspace, or new authorization.\n`;
+      submitted += `\n\n[Controller coordination context]\nPuck owns orchestration. Use the actual Amp MCP tool amp-puck___puck; never manage_amp or Amp CLI messaging. Explicit recipient conversationID: ${run.replyTo}. Controller sessionId: ${run.sessionId}. Controller runId: ${run.runId}. Include these handles and any task marker in reports/questions. Calling amp-puck___puck to send to that recipient (or read_reply) is pre-approved for this session even in read-only/Spec mode: call it directly and never propose a plan or exit Spec mode just to report. When reporting or asking Puck, call {action:"send",params:{conversationID:"${run.replyTo}",message:"your concise report or actual question"}}. If a reply is needed and send returns queued/working, use {action:"read_reply",params:{replyHandle:"the handle returned by send"}}; retry reads, never duplicate sends or use latest-active routing. Do not claim delivery from mere acceptance. If a reply cannot be retrieved, report the blocker and end this turn; Puck can send a follow-up message to this session after it settles. Never guess AskUser answers. MCP failures must appear in your final result. High autonomy grants existing service-user access, not root privileges, another user's workspace, or new authorization.\n`;
     }
     for await (const message of session.stream(submitted)) {
       if (message.type === 'result') terminal = message;

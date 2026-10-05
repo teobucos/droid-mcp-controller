@@ -14,7 +14,8 @@ const label = z.string().min(1).max(64).regex(/^[a-z0-9][a-z0-9-]*$/, 'labels ar
 const labels = z.array(label).max(20);
 const model = z.string().min(1).max(200).regex(nonBlank, 'must not be blank').describe('A model id from droid_models, chosen explicitly for this turn.');
 const replyTo = z.string().regex(/^T-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/, 'replyTo must be a Puck conversation id like T-xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx, or null');
-const iso = z.string().datetime({ offset: true, message: 'must be an ISO 8601 date-time, e.g. 2026-10-01T00:00:00Z' });
+const iso = z.string().datetime({ offset: true, message: 'must be an ISO 8601 date-time, e.g. 2026-10-01T00:00:00Z' })
+  .refine((value) => Number.isFinite(Date.parse(value)), 'must be a real date-time with a valid UTC offset');
 const cursor = z.string().min(1).max(512);
 const limit = (fallback) => z.number().int().min(1).max(100).default(fallback);
 const session = uuid.describe('Session handle from droid_create_session or droid_find_sessions.');
@@ -120,7 +121,7 @@ export function defineTools(controller, models, config) {
 
     tool('droid_get_usage',
       'Get token usage for one Droid session, or for every controller turn when session is omitted. Returns turns, turnsWithUsage, summed token counts and factoryCredits (null when Factory reported none). ' +
-      "Example: {session:'SESSION_ID'} or {after:'2026-10-01T00:00:00Z', before:'2026-11-01T00:00:00Z'}. Dates filter turn creation time, after inclusive and before exclusive. Each accepted turn counts once; retries with the same requestKey are not double counted. " +
+      "Example: {session:'SESSION_ID'} or {after:'2026-10-01T00:00:00Z', before:'2026-11-01T00:00:00Z'}. Dates filter turn creation time, after inclusive and before exclusive. Each turn that was submitted counts once (turns cancelled while still queued never ran and are not counted); retries with the same requestKey are not double counted. " +
       'Missing usage is never counted as zero credits or guessed in dollars. Makes no model or billing call. Unknown sessions and invalid ranges reject.',
       z.object({ session: uuid.optional(), after: iso.optional(), before: iso.optional() }).strict(),
       z.object({ session: z.string().nullable(), turns: z.number(), turnsWithUsage: z.number(), tokens, factoryCredits: z.number().nullable() }),

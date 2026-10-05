@@ -117,7 +117,7 @@ Cancel a Droid session: interrupt its running turn and drop its queued follow-up
 
 ### `droid_get_usage`
 
-Get token usage for one Droid session, or for every controller turn when session is omitted. Returns turns, turnsWithUsage, summed token counts and factoryCredits (null when Factory reported none). Example: {session:'SESSION_ID'} or {after:'2026-10-01T00:00:00Z', before:'2026-11-01T00:00:00Z'}. Dates filter turn creation time, after inclusive and before exclusive. Each accepted turn counts once; retries with the same requestKey are not double counted. Missing usage is never counted as zero credits or guessed in dollars. Makes no model or billing call. Unknown sessions and invalid ranges reject.
+Get token usage for one Droid session, or for every controller turn when session is omitted. Returns turns, turnsWithUsage, summed token counts and factoryCredits (null when Factory reported none). Example: {session:'SESSION_ID'} or {after:'2026-10-01T00:00:00Z', before:'2026-11-01T00:00:00Z'}. Dates filter turn creation time, after inclusive and before exclusive. Each turn that was submitted counts once (turns cancelled while still queued never ran and are not counted); retries with the same requestKey are not double counted. Missing usage is never counted as zero credits or guessed in dollars. Makes no model or billing call. Unknown sessions and invalid ranges reject.
 
 **Input**
 
