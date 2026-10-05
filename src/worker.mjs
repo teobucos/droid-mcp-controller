@@ -54,10 +54,15 @@ async function preflightAmpMcp() {
         throw new SetupError('amp_mcp_setup_failed', /timed out/.test(error.message) ? 'MCP tool discovery timed out' : 'MCP tool discovery failed');
       }
     };
-    const others = (all) => all.filter((tool) => tool.id.startsWith('amp-puck___') && tool.id !== PUCK_TOOL);
+    // The SDK reports a tool's llmId as `id` and drops the protocol id used for denial. Identify the
+    // server's tools from its own registry as well as by prefix, and deny by the protocol form.
+    const registry = (await session.listMcpTools().catch(() => [])).filter((tool) => tool.serverName === 'amp-puck').map((tool) => tool.name);
+    const isAmp = (tool) => tool.id.startsWith('amp-puck___') || registry.some((name) => tool.id === name || tool.id.endsWith(`___${name}`));
+    const others = (all) => all.filter((tool) => isAmp(tool) && tool.id !== PUCK_TOOL && tool.id !== 'puck');
     let tools = await list();
     if (others(tools).some((tool) => tool.allowed)) {
-      await session.updateSettings({ disabledToolIds: [...new Set([...DENIED_TOOLS, ...others(tools).map((tool) => tool.id)])] }).catch(() => {});
+      const names = [...registry.filter((name) => name !== 'puck').map((name) => `amp-puck___${name}`), ...others(tools).map((tool) => tool.id.startsWith('amp-puck___') ? tool.id : `amp-puck___${tool.id}`)];
+      await session.updateSettings({ disabledToolIds: [...new Set([...DENIED_TOOLS, ...names])] }).catch(() => {});
       tools = await list();
     }
     if (others(tools).some((tool) => tool.allowed)) throw new SetupError('amp_mcp_admin_tool_exposed', 'The Amp MCP exposes a tool other than puck to the agent and it could not be denied');
@@ -158,6 +163,7 @@ process.on('message', async (msg) => {
       await event({ type: 'puck_mcp_ready', tool: PUCK_TOOL });
       submitted += `\n\n[Controller coordination context]\nPuck owns orchestration. Use the actual Amp MCP tool amp-puck___puck; never manage_amp or Amp CLI messaging. Explicit recipient conversationID: ${run.replyTo}. Controller sessionId: ${run.sessionId}. Controller runId: ${run.runId}. Include these handles and any task marker in reports/questions. Calling amp-puck___puck to send to that recipient (or read_reply) is pre-approved for this session even in read-only/Spec mode: call it directly and never propose a plan or exit Spec mode just to report. When reporting or asking Puck, call {action:"send",params:{conversationID:"${run.replyTo}",message:"your concise report or actual question"}}. If a reply is needed and send returns queued/working, use {action:"read_reply",params:{replyHandle:"the handle returned by send"}}; retry reads, never duplicate sends or use latest-active routing. Do not claim delivery from mere acceptance. If a reply cannot be retrieved, report the blocker and end this turn; Puck can send a follow-up message to this session after it settles. Never guess AskUser answers. MCP failures must appear in your final result. High autonomy grants existing service-user access, not root privileges, another user's workspace, or new authorization.\n`;
     }
+    await send({ kind: 'submitted' });
     for await (const message of session.stream(submitted)) {
       if (message.type === 'result') terminal = message;
       else {

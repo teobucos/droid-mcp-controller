@@ -11,7 +11,7 @@ import { randomUUID } from 'node:crypto';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
-const { values } = parseArgs({ options: { instance: { type: 'string' }, out: { type: 'string' }, 'reply-to': { type: 'string' }, luna: { type: 'string', default: 'gpt-6-luna' }, haiku: { type: 'string', default: 'claude-haiku-4-5-20251001' }, sonnet: { type: 'string', default: 'claude-sonnet-5-5' }, routed: { type: 'boolean', default: false } } });
+const { values } = parseArgs({ options: { instance: { type: 'string' }, out: { type: 'string' }, 'reply-to': { type: 'string' }, luna: { type: 'string', default: 'gpt-6-luna' }, haiku: { type: 'string', default: 'claude-haiku-4-5-20251001' }, sonnet: { type: 'string', default: 'claude-sonnet-5-5' }, routed: { type: 'boolean', default: false }, 'allow-blocked': { type: 'boolean', default: false } } });
 if (!values.instance || !values.out) throw new Error('Usage: node scripts/acceptance.mjs --instance DIR --out FILE [--reply-to T-...]');
 const config = JSON.parse(readFileSync(join(values.instance, 'config.json'), 'utf8'));
 if (!/\/accept/.test(values.instance) && !process.env.ACCEPTANCE_ALLOW_ANY_DIR) throw new Error('Refusing to run: instance directory must be a dedicated acceptance instance');
@@ -151,7 +151,8 @@ try {
     report.markersSentToPuck = [...tags, `steered-${RUN}`, 'reply-back session in p1'];
   }
   report.blocked = Object.values(report.phases).flat().filter((c) => c.blocked).map((c) => ({ name: c.name, because: c.blocked }));
-  report.passed = Object.values(report.phases).every((phase) => phase.every((c) => c.ok || c.blocked));
+  // A blocked check is a required behaviour that could not be proven: not a pass unless explicitly allowed.
+  report.passed = Object.values(report.phases).every((phase) => phase.every((c) => c.ok || (c.blocked && values['allow-blocked'])));
 } catch (error) {
   report.error = error.message;
   console.error('Acceptance aborted:', error.message);

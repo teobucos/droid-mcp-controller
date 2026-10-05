@@ -11,7 +11,7 @@ const DEFAULT_MESSAGE = { failed: 'The turn failed.', timed_out: 'The turn excee
 
 // SDK, server and OS text can embed ids, paths and URLs (including OAuth fragments).
 // New tools return a scrubbed message; raw text stays in local state and legacy views.
-const scrub = (text) => text
+export const scrub = (text) => text
   .replace(/https?:\/\/\S+/g, '<url>')
   .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<id>')
   .replace(/(?:\/[\w.@~+-]+){2,}/g, '<path>')
@@ -68,12 +68,12 @@ const stringify = (value) => typeof value === 'string' ? value : JSON.stringify(
 // SDK result messages -> retained history. User messages (the prompts) are never retained.
 export function resultMessages(run, result) {
   const out = [];
-  result.messages.forEach((m, index) => {
+  (result.messages ?? []).forEach((m, index) => {
     const id = `${run.runId}:${index}`;
     if (m.type === 'assistant' && typeof m.text === 'string' && m.text) out.push({ id, runId: run.runId, role: 'assistant', type: 'message', ...clip(m.text) });
     else if (m.type === 'tool_call') out.push({ id, runId: run.runId, role: 'tool', type: 'tool_call', ...clip(`${m.name} ${stringify(m.input ?? {})}`) });
     else if (m.type === 'tool_result') out.push({ id, runId: run.runId, role: 'tool', type: 'tool_result', ...clip(`${m.isError ? '[error] ' : ''}${stringify(m.content ?? '')}`) });
-    else if (m.type === 'error') out.push({ id, runId: run.runId, role: 'controller', type: 'error', ...clip(String(m.message ?? 'error')) });
+    else if (m.type === 'error') out.push({ id, runId: run.runId, role: 'controller', type: 'error', ...clip(scrub(String(m.message ?? 'error'))) });
   });
   return out;
 }

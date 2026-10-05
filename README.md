@@ -32,7 +32,7 @@ Factory session UUIDs never leave the controller.
 | `droid_get_session_status` | `agentState`, metadata, preview, latest run, declined questions, reply-back notification. | Controller records plus the SDK terminal result |
 | `droid_read_session` | Paged history. | Terminal SDK result messages the controller retained |
 | `droid_wait_for_sessions` | Join up to 10 sessions; bounded; returns when all settle. | Controller bookkeeping, no Droid call |
-| `droid_find_sessions` | Text and typed filters, newest created first, keyset cursor. | Controller records (Factory's `droid search` and SDK `listSessions` are not used: they would expose unrelated service-user history) |
+| `droid_find_sessions` | Text (title, labels, bounded output preview/tail) and typed filters, newest created first, keyset cursor. | Controller records (Factory's `droid search` and SDK `listSessions` are not used: they would expose unrelated service-user history) |
 | `droid_update_session` | Title, labels, archive. | Controller metadata (no private Factory files are edited) |
 | `droid_cancel_session` | Interrupt the running turn, drop queued turns. | `session.interrupt()` then process-group kill after the grace period |
 | `droid_get_usage` | Sum of per-turn token usage and Factory credits. | `DroidResult.tokenUsage` (including `factoryCredits`) |
@@ -90,6 +90,8 @@ are not undone. Cancelling or steering one session never touches another.
 | `interrupted` | Terminal SDK result `interrupted` (cancelled, steered, or a rejected permission). |
 | `failed`, `timed_out`, `cancelled` | Setup/agent failure; deadline; cancelled without a terminal result (including dropped queued turns). |
 | `unknown` | Controller stopped mid-turn. Never replayed, never inferred as success; the session cannot continue. |
+
+A turn whose worker dies without a result is `failed`, and turns queued behind it on that session are dropped unsubmitted (`predecessor_failed`) so Puck decides what to do; the queue never resumes work across a failure.
 
 `agentState` is `working` (anything queued or live), `idle` (nothing pending; **not** a
 success claim) or `unknown`. `droid_wait_for_sessions` treats every non-working

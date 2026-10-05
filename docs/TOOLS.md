@@ -76,7 +76,7 @@ Wait for up to ten Droid sessions to settle, then return their status in input o
 
 ### `droid_find_sessions`
 
-Find Droid sessions with text and typed filters, newest created first. Returns sessions (same shape as droid_get_session_status) and nextCursor; pass the cursor with unchanged filters for the next page. Example: {query:'authorization', state:'idle', labels:['review'], limit:25}. Filters combine with AND; labels requires every label. query is a case-insensitive text match over title, labels and retained output (never prompts). workspace includes sessions in descendants of that approved directory. after is inclusive and before exclusive, by creation time. Archived sessions are hidden unless archived:true selects archived only. A newer session never shifts later pages. Invalid ranges and cursors reject.
+Find Droid sessions with text and typed filters, newest created first. Returns sessions (same shape as droid_get_session_status) and nextCursor; pass the cursor with unchanged filters for the next page. Example: {query:'authorization', state:'idle', labels:['review'], limit:25}. Filters combine with AND; labels requires every label. query is a case-insensitive text match over title, labels and the last part of each turn's output (the controller keeps a bounded preview and tail, not full transcripts; use droid_read_session for full history). Prompts are never searched. workspace includes sessions in descendants of that approved directory. after is inclusive and before exclusive, by creation time. Archived sessions are hidden unless archived:true selects archived only. A newer session never shifts later pages. Invalid ranges and cursors reject.
 
 **Input**
 

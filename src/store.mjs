@@ -80,6 +80,7 @@ function toV3(state) {
     run.replyTo = run.puckConversationId ?? null;
     delete run.puckConversationId;
     run.preview = run.textTail.slice(-4000);
+    if (run.droidSessionId || run.result) run.submittedAt = run.createdAt; // legacy: the prompt reached Droid once a session existed
     session.headRunId = state.sessionHeads[run.droidSessionId] ?? run.runId;
     session.updatedAt = run.updatedAt ?? run.createdAt;
   }
@@ -119,6 +120,12 @@ export function openStore(config) {
       throw new Error('Invalid state or state belongs to another host/HOME; do not reset it');
     }
     const loadedVersion = state.version;
+    const keys = new Set();
+    for (const run of Object.values(state.runs)) {
+      if (!Number.isFinite(Date.parse(run.createdAt))) throw new Error('Corrupt state: invalid createdAt on a run');
+      if (keys.has(run.requestKey)) throw new Error('Corrupt state: duplicate requestKey');
+      keys.add(run.requestKey);
+    }
     if (state.version === 1) toV2(state);
     if (state.version === 2) {
       for (const [sessionId, headId] of Object.entries(state.sessionHeads)) {
@@ -130,8 +137,9 @@ export function openStore(config) {
       toV3(state);
       persisted.parse(state); // The candidate must itself be valid before anything is written.
       // Validated: keep the pre-migration bytes next to the new state, never overwriting a backup.
-      const backup = `${statePath}.v${loadedVersion}.bak`;
-      if (!existsSync(backup)) { copyFileSync(statePath, backup, constants.COPYFILE_EXCL); const fd = openSync(backup, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); } }
+      let backup = `${statePath}.v${loadedVersion}.bak`;
+      if (existsSync(backup)) backup = `${backup}.${Date.now()}`; // never overwrite, never skip: this file is THIS migration's preimage
+      { copyFileSync(statePath, backup, constants.COPYFILE_EXCL); const fd = openSync(backup, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); } }
     }
     const seqs = new Set();
     for (const session of Object.values(state.sessions)) {
@@ -151,6 +159,9 @@ export function openStore(config) {
     for (const [id, run] of Object.entries(state.runs)) {
       if (id !== run.runId) throw new Error('Corrupt state: runId differs from record key');
       if (!state.sessions[run.sessionId]) throw new Error('Corrupt state: run without session');
+      if (run.droidSessionId && state.sessions[run.sessionId].droidSessionId && run.droidSessionId !== state.sessions[run.sessionId].droidSessionId) {
+        throw new Error('Corrupt state: a run names a Droid session different from its controller session');
+      }
       if (run.state === 'queued') {
         // Prompts are memory-only: a queued turn can never be resumed, and was never submitted.
         run.state = 'cancelled'; run.errorCode = 'queue_lost'; run.finishedAt = now();
@@ -160,7 +171,11 @@ export function openStore(config) {
         if (run.result) {
           const result = JSON.parse(readFileSync(join(dir, `${id}.result.json`), 'utf8'));
           if (result.sessionId !== run.droidSessionId) throw new Error('Corrupt state: terminal session UUID mismatch');
-          run.state = resultState(result, run.stopReason);
+          if (typeof result.subtype !== 'string' || !Array.isArray(result.messages) || typeof result.text !== 'string') {
+            // An incomplete result must never be promoted to an outcome.
+            run.state = 'unknown'; run.errorCode = 'unknown_outcome'; run.result = false;
+            run.error = 'The stored terminal result is incomplete; reconcile Droid history and the workspace locally.';
+          } else run.state = resultState(result, run.stopReason);
         } else {
           run.state = 'unknown'; run.errorCode = 'unknown_outcome';
           run.error = 'Controller stopped before a durable terminal outcome. Reconcile Droid history and workspace locally; work was not replayed.';

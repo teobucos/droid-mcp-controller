@@ -37,6 +37,7 @@ await transport.connect();
 // failed to start is dropped from the hub, so the sign-in uses a PROJECT-level definition
 // inside a throwaway workspace: nothing is added to the user's persistent Factory MCP config.
 const definition = join(cwd, '.factory', 'mcp.json');
+if (existsSync(definition)) throw new Error(`${definition} already exists; use an empty throwaway workspace so no project MCP config is overwritten`);
 mkdirSync(join(cwd, '.factory'), { recursive: true });
 writeFileSync(definition, JSON.stringify({ mcpServers: { 'amp-puck': { type: 'http', url, oauth: { resource: 'https://ampcode.com/mcp', callbackPort: Number(values['callback-port']) }, disabledTools: ['manage_amp'] } } }, null, 2), { mode: 0o600 });
 const session = await createSession({ transport, cwd, disableBuiltinSkills: true, interactionMode: 'spec', autonomyLevel: 'off' });
@@ -83,7 +84,7 @@ try {
       await sleep(1000);
     }
     if (settled?.success) break;
-    console.log(`AUTH_ATTEMPT_${attempt}_ENDED success=${Boolean(settled?.success)}${settled?.error ? ` error=${String(settled.error).replace(/(https?:\/\/[^\s?]+)\?\S*/g, "$1").slice(0, 200)}` : ""}`);
+    console.log(`AUTH_ATTEMPT_${attempt}_ENDED success=${Boolean(settled?.success)}${settled?.error ? ` error=${String(settled.error).replace(/https?:\/\/\S+/g, '<url>').replace(/[0-9a-f]{8}-[0-9a-f-]{27}/gi, '<id>').slice(0, 200)}` : ""}`);
   }
   await sleep(1000);
   const servers = (await session.listMcpServers()).servers.find((s) => s.name === 'amp-puck');

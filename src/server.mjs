@@ -17,6 +17,7 @@ async function main() {
   const shutdown = async () => {
     if (closing) return;
     closing = true;
+    controller.stopping = true; // before anything else awaits: in-flight requests must not admit work
     listener?.close(); listener?.closeIdleConnections();
     await models.close();
     await controller.close();

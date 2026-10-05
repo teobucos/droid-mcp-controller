@@ -3,11 +3,13 @@
 // Written before the implementation; each case names the wrong implementation it catches.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, symlinkSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from 'node:fs';
+import { mkdirSync, symlinkSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync, chmodSync } from 'node:fs';
 import { hostname, homedir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
-import { boot, stop, call, audit, readState, writeCatalog, sleep } from './harness.mjs';
+import { request as httpRequest } from 'node:http';
+import { once } from 'node:events';
+import { boot, stop, call, audit, readState, writeCatalog, sleep, token } from './harness.mjs';
 
 const PUCK = 'T-11111111-1111-4111-8111-111111111111';
 const PUCK2 = 'T-22222222-2222-4222-8222-222222222222';
@@ -789,5 +791,147 @@ test('review fixes: default-deny, revoked workspace, scrubbing, reporting, migra
     assert.equal(readFileSync(path, 'utf8'), bytes);
     assert.ok(!existsSync(`${path}.v2.bak`), 'no backup for a migration that was refused');
     rmSync(h.dir, { recursive: true, force: true });
+  });
+});
+
+test('adversarial fixes: unexpected worker death, default-deny aliases, admission, usage, durability, scrubbing', async (t) => {
+  await t.test('a worker killed after submission fails the turn and DROPS queued follow-ups instead of resuming them', async () => {
+    const h = await fixture();
+    try {
+      const s = await h.create('kill-a', 'slow');
+      const sid = s.metadata.session;
+      await h.waitFor(() => h.turns('slow').length, 'turn submitted');
+      const queued = await h.send(sid, 'kill-b', 'follow-after-kill');
+      assert.equal(queued.disposition, 'queued');
+      process.kill(audit(h).find((x) => x.method === 'droid.add_user_message' && x.params.text.startsWith('slow')).workerPid, 'SIGKILL');
+      const status = (await h.settle([sid])).sessions[0];
+      assert.equal(status.latestRun.state, 'cancelled');
+      assert.equal(status.latestRun.error.code, 'predecessor_failed');
+      assert.equal(status.latestRun.needsAttention, false);
+      const runs = Object.values(readState(h).runs).filter((r) => r.sessionId === sid);
+      assert.deepEqual(runs.map((r) => r.state), ['failed', 'cancelled']);
+      assert.equal(h.turns('follow-after-kill').length, 0, 'the queued turn was never submitted');
+      assert.equal((await call(h, 'droid_get_usage', { session: sid })).turns, 1, 'only the submitted turn counts');
+    } finally { await done(h); }
+  });
+
+  await t.test('an Amp tool whose llmId differs from its protocol id is still found and denied; usage excludes preflight failures', async () => {
+    const h = await fixture({ ampMcp: { url: AMP_URL } }, { MOCK_PUCK_FAILURE: 'alias' });
+    try {
+      const s = await h.create('alias-a', 'normal', { replyTo: PUCK });
+      assert.equal((await h.settle([s.metadata.session])).sessions[0].latestRun.state, 'succeeded');
+      const update = audit(h).find((x) => x.method === 'droid.update_session_settings' && x.params.disabledToolIds);
+      assert.ok(update.params.disabledToolIds.includes('amp-puck___brand_new_tool'));
+    } finally { await done(h); }
+    const f = await fixture({ ampMcp: { url: AMP_URL } }, { MOCK_PUCK_FAILURE: 'puck-missing' });
+    try {
+      const s = await f.create('preflight-usage', 'no-echo:never', { replyTo: PUCK });
+      assert.equal((await f.settle([s.metadata.session])).sessions[0].latestRun.state, 'failed');
+      assert.equal((await call(f, 'droid_get_usage', { session: s.metadata.session })).turns, 0, 'no prompt was submitted, so no turn');
+    } finally { await done(f); }
+  });
+
+  await t.test('a rejected admission does not block later queued turns', async () => {
+    const h = await fixture({ maxConcurrentRuns: 1 });
+    try {
+      const busy = await h.create('adm-busy', 'sleep:600 busy', { workspace: h.ws('adm-a') });
+      const doomed = await h.create('adm-doomed', 'normal', { workspace: h.ws('adm-b') });
+      const later = await h.create('adm-later', 'normal', { workspace: h.ws('adm-b') });
+      assert.deepEqual([doomed, later].map((x) => x.latestRun.state), ['queued', 'queued']);
+      rmSync(join(h.dir, 'workspace/adm-b'), { recursive: true });
+      const result = await h.settle([busy, doomed, later].map((x) => x.metadata.session));
+      assert.equal(result.sessions[1].latestRun.error.code, 'workspace_not_approved');
+      assert.equal(result.sessions[2].latestRun.error.code, 'workspace_not_approved', 'the next turn is judged on its own and is not stranded');
+      assert.deepEqual(await h.capacity(), { maximum: 1, active: 0, queued: 0, available: 1 });
+    } finally { await done(h); }
+  });
+
+  await t.test('a request already in flight when shutdown begins cannot admit work', async () => {
+    const h = await fixture({ runTimeoutMs: 6000 });
+    // A hung model discovery keeps shutdown busy: the window in which the old ordering still admitted work.
+    writeCatalog(h, { mode: 'hang' });
+    h.client.callTool({ name: 'droid_models', arguments: {} }).catch(() => {});
+    await sleep(300);
+    const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'droid_start', arguments: { requestKey: 'after-shutdown', workspace: h.ws(), prompt: 'normal' } } });
+    const outcome = new Promise((resolve) => {
+      const req = httpRequest(h.url, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'content-length': Buffer.byteLength(body) } }, (res) => { let text = ''; res.on('data', (c) => { text += c; }); res.on('end', () => resolve(text)); });
+      req.on('error', () => resolve('connection-error'));
+      req.write(body.slice(0, 40));
+      setTimeout(() => { h.proc.kill('SIGTERM'); setTimeout(() => req.end(body.slice(40)), 150); }, 100);
+    });
+    const text = await outcome;
+    if (h.proc.exitCode === null) { h.proc.kill('SIGKILL'); await once(h.proc, 'exit'); }
+    const state = JSON.parse(readFileSync(join(h.dir, 'state/state.json'), 'utf8'));
+    assert.equal(Object.values(state.runs).filter((r) => r.requestKey === 'after-shutdown').length, 0, `nothing was accepted: ${text.slice(0, 300)}`);
+    assert.equal(audit(h).filter((x) => x.method === 'droid.add_user_message').length, 0);
+    rmSync(h.dir, { recursive: true, force: true });
+  });
+
+  await t.test('read_session scrubs SDK error text like status does', async () => {
+    const h = await fixture();
+    try {
+      const s = await h.create('scrub-a', 'leaky-error');
+      await h.settle([s.metadata.session]);
+      const text = JSON.stringify(await call(h, 'droid_read_session', { session: s.metadata.session, limit: 100 }));
+      assert.match(text, /boom/, 'the error is still reported');
+      assert.ok(!/11111111-2222|private\/mock|example\.invalid|MOCK_ONLY/.test(text), 'ids, paths and URLs are removed');
+    } finally { await done(h); }
+  });
+
+  await t.test('durability: failed write leaves nothing accepted; refused migrations keep their own preimage; corrupt state refuses', async () => {
+    const h = await fixture();
+    const a = await h.create('dur-a', 'normal');
+    await h.settle([a.metadata.session]);
+    await stop(h);
+    const path = join(h.dir, 'state/state.json');
+    const good = JSON.parse(readFileSync(path, 'utf8'));
+    const refuse = async (mutate, pattern) => {
+      const bad = structuredClone(good); mutate(bad);
+      const bytes = JSON.stringify(bad); writeFileSync(path, bytes);
+      await assert.rejects(boot({}, {}, h.dir), pattern);
+      assert.equal(readFileSync(path, 'utf8'), bytes, 'refused state is never rewritten');
+    };
+    const [run] = Object.values(good.runs);
+    await refuse((s) => { Object.values(s.runs)[0].createdAt = '2026-10-01T00:00:00+25:00'; }, /createdAt/);
+    await refuse((s) => { const copy = { ...Object.values(s.runs)[0], runId: randomUUID() }; s.runs[copy.runId] = copy; }, /duplicate requestKey/);
+    await refuse((s) => { s.sessions[run.sessionId].droidSessionId = randomUUID(); }, /different from its controller session/);
+    // A pre-existing backup is kept and THIS migration's preimage is retained under its own name.
+    const v2 = { version: 2, host: good.host, home: good.home, factoryHomeOverride: good.factoryHomeOverride, sessionHeads: { [run.droidSessionId]: run.runId }, runs: { [run.runId]: (({ sessionId, replyTo, disposition, preview, submittedAt, ...rest }) => rest)(run) } };
+    const v2Bytes = JSON.stringify(v2);
+    writeFileSync(path, v2Bytes); writeFileSync(`${path}.v2.bak`, 'older backup');
+    const migrated = await boot({}, {}, h.dir);
+    await stop(migrated);
+    assert.equal(readFileSync(`${path}.v2.bak`, 'utf8'), 'older backup', 'an existing backup is never overwritten');
+    const extra = readdirSync(join(h.dir, 'state')).filter((f) => f.startsWith('state.json.v2.bak.'));
+    assert.equal(extra.length, 1);
+    assert.equal(readFileSync(join(h.dir, 'state', extra[0]), 'utf8'), v2Bytes, 'the new backup is this migration\'s exact preimage');
+    // An incomplete terminal result is never promoted to an outcome.
+    writeFileSync(path, JSON.stringify(good));
+    const resultPath = join(h.dir, 'state', `${run.runId}.result.json`);
+    const result = JSON.parse(readFileSync(resultPath, 'utf8'));
+    const crashed = structuredClone(good); Object.values(crashed.runs)[0].state = 'running'; writeFileSync(path, JSON.stringify(crashed));
+    writeFileSync(resultPath, JSON.stringify({ sessionId: result.sessionId, subtype: 'success' }));
+    const again = decorate(await boot({}, {}, h.dir));
+    try {
+      const status = await call(again, 'droid_get_session_status', { session: a.metadata.session });
+      assert.equal(status.latestRun.state, 'unknown', 'an incomplete result is unknown, not succeeded');
+      assert.equal(status.latestRun.needsAttention, true);
+      assert.equal((await call(again, 'droid_read_session', { session: a.metadata.session })).historyAvailable, false);
+      // Failed durable write: nothing stays accepted in memory.
+      const ro = join(again.dir, 'state');
+      const created = await again.create('dur-ok', 'normal', { workspace: again.ws('dur-ok') });
+      await again.settle([created.metadata.session]);
+      chmodSync(ro, 0o500);
+      let denied = false;
+      try { await again.create('dur-fail', 'normal', { workspace: again.ws('dur-fail') }); } catch (error) { denied = error.code === 'internal_error'; }
+      chmodSync(ro, 0o700);
+      if (process.getuid?.() !== 0) {
+        assert.ok(denied, 'a failed durable write rejects the request');
+        const retry = await again.create('dur-fail', 'normal', { workspace: again.ws('dur-fail') });
+        assert.equal(retry.latestRun.state === 'queued' ? 'queued' : 'started', 'started', 'the retry is a fresh acceptance');
+        assert.equal((await again.settle([retry.metadata.session])).sessions[0].latestRun.state, 'succeeded', 'and it really runs (no phantom key)');
+        assert.equal(Object.values(readState(again).runs).filter((r) => r.requestKey === 'dur-fail').length, 1);
+      }
+    } finally { await done(again); }
   });
 });

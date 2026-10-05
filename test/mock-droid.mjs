@@ -60,7 +60,8 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     case 'droid.update_session_settings':
       settings = { ...settings, ...p }; persist(); reply(req, {}); break;
     case 'droid.list_mcp_tools':
-      reply(req, { tools: [] }); break;
+      if (['unlisted', 'archived'].includes(process.env.MOCK_PUCK_FAILURE)) { reply(req, { tools: [] }); break; }
+      reply(req, { tools: ['puck', 'manage_amp', 'find_thread', 'read_thread', ...(['new-tool', 'undeniable', 'alias'].includes(process.env.MOCK_PUCK_FAILURE) ? ['brand_new_tool'] : [])].map((name) => ({ serverName: 'amp-puck', name, isEnabled: true })) }); break;
     case 'droid.list_mcp_servers':
       if (process.env.MOCK_PUCK_FAILURE === 'leaky') {
         reply(req, { servers: [{ name: 'amp-puck', status: 'failed', error: 'boom 11111111-2222-4333-8444-555555555555 at /home/box/.factory/private/x https://example.invalid/cb#state=SECRETSTATE', source: 'project', isManaged: false, serverType: 'http', requiresAuth: true, hasAuthTokens: true }], summary: { total: 1, connected: 0, connecting: 0, failed: 1 } }); break;
@@ -74,7 +75,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (['archived', 'unlisted'].includes(process.env.MOCK_PUCK_FAILURE)) {
         send({ ...envelope('response'), id: req.id, error: { code: -32000, message: 'Unknown tool identifier(s): amp-puck___manage_amp' } }); break;
       }
-      reply(req, { tools: ['puck', 'manage_amp', 'find_thread', 'read_thread', ...(['new-tool', 'undeniable'].includes(process.env.MOCK_PUCK_FAILURE) ? ['brand_new_tool'] : [])].filter((name) => process.env.MOCK_PUCK_FAILURE !== 'unauthenticated' && !(name === 'puck' && process.env.MOCK_PUCK_FAILURE === 'puck-missing')).map((name) => ({ id: `amp-puck___${name}`, llmId: `amp-puck___${name}`, displayName: name, description: name, category: 'read', defaultAllowed: true, currentlyAllowed: name === 'puck' || process.env.MOCK_PUCK_FAILURE === 'admin-allowed' || (process.env.MOCK_PUCK_FAILURE === 'undeniable' && name === 'brand_new_tool') || !settings.disabledToolIds?.includes(`amp-puck___${name}`) })) }); break;
+      reply(req, { tools: ['puck', 'manage_amp', 'find_thread', 'read_thread', ...(['new-tool', 'undeniable', 'alias'].includes(process.env.MOCK_PUCK_FAILURE) ? ['brand_new_tool'] : [])].filter((name) => process.env.MOCK_PUCK_FAILURE !== 'unauthenticated' && !(name === 'puck' && process.env.MOCK_PUCK_FAILURE === 'puck-missing')).map((name) => ({ id: `amp-puck___${name}`, llmId: process.env.MOCK_PUCK_FAILURE === 'alias' && name === 'brand_new_tool' ? name : `amp-puck___${name}`, displayName: name, description: name, category: 'read', defaultAllowed: true, currentlyAllowed: name === 'puck' || process.env.MOCK_PUCK_FAILURE === 'admin-allowed' || (process.env.MOCK_PUCK_FAILURE === 'undeniable' && name === 'brand_new_tool') || !settings.disabledToolIds?.includes(`amp-puck___${name}`) })) }); break;
     case 'droid.add_user_message':
       turnId = p.messageId; const text0 = p.text; prompt = p.text.split('\n\n[Controller coordination context]')[0]; reply(req, {});
       const now = Date.now();
@@ -87,6 +88,9 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (prompt === 'wrong-turn') { terminal('completed', randomUUID()); return; }
       if (prompt === 'permission' || prompt === 'permission-once') {
         send({ ...envelope('request'), id: 'permission-1', method: 'droid.request_permission', params: { toolUses: [], options: [...(prompt === 'permission-once' ? [{ label: 'Proceed once', value: 'proceed_once' }] : []), { label: 'Cancel', value: 'cancel' }] } }); return;
+      }
+      if (prompt === 'leaky-error') {
+        notify({ type: 'error', message: 'boom 11111111-2222-4333-8444-555555555555 /private/mock/.factory/token https://example.invalid/callback#state=MOCK_ONLY', errorType: 'Error', timestamp: new Date().toISOString() });
       }
       if (prompt.startsWith('puck-permission')) {
         const recipient = puckRecipient = prompt === 'puck-permission-wrong' ? 'T-99999999-9999-4999-8999-999999999999' : text0.match(/conversationID: (T-[0-9a-f-]{36})/)?.[1];

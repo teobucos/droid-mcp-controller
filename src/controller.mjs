@@ -22,8 +22,8 @@ const MAX_PENDING_PER_SESSION = 8;
 const now = () => new Date().toISOString();
 const sha = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const sum = (items, key) => items.reduce((total, item) => total + (item[key] ?? 0), 0);
-// A turn was submitted to Droid (or is known to have been) rather than dropped while queued.
-const submitted = (run) => Boolean(run.startedAt || run.droidSessionId || run.result);
+// The task prompt reached Droid (or may have): not dropped while queued, not stopped by preflight.
+const submitted = (run) => Boolean(run.submittedAt || run.result || run.state === 'unknown');
 const conflicts = (a, b) => (a.autonomy !== 'off' || b.autonomy !== 'off') && pathsOverlap(a.workspace, b.workspace);
 
 function cursorOf(cursor) {
@@ -140,6 +140,7 @@ export class Controller {
       if (runs.filter((run) => WORKING.has(run.state)).length >= MAX_PENDING_PER_SESSION) throw new ToolError('queue_full', 'Too many turns are already pending on this session');
     }
     const stamp = now();
+    const before = target ? { headRunId: target.headRunId, archived: target.archived, replyTo: target.replyTo, updatedAt: target.updatedAt } : null;
     const session = target ?? (() => {
       const sessionId = randomUUID();
       const created = { sessionId, seq: this.state.nextSeq++, title: intent.title ?? defaultTitle(sessionId), labels, archived: false, workspace, replyTo, droidSessionId: null, headRunId: null, createdAt: stamp, updatedAt: stamp };
@@ -157,7 +158,17 @@ export class Controller {
     session.headRunId = run.runId;
     if (target) { session.archived = false; session.replyTo = replyTo; }
     session.updatedAt = stamp;
-    this.store.save(); // Idempotency and intent are durable BEFORE any subprocess starts.
+    try {
+      this.store.save(); // Idempotency and intent are durable BEFORE any subprocess starts.
+    } catch (error) {
+      // Nothing durable was accepted, so nothing may stay accepted in memory either.
+      delete this.state.runs[run.runId];
+      this.keys.delete(requestKey);
+      this.bySession.get(session.sessionId).pop();
+      if (target) Object.assign(target, before);
+      else { delete this.state.sessions[session.sessionId]; this.bySession.delete(session.sessionId); this.state.nextSeq--; }
+      throw error;
+    }
     this.queue.push({ run, prompt: intent.prompt });
     if (disposition === 'interrupting') for (const live of runs.filter((item) => LIVE.has(item.state))) this.stopWorker(live, 'cancel');
     this.pump();
@@ -177,10 +188,9 @@ export class Controller {
       const { run } = item;
       const blocked = this.workers.size >= this.config.maxConcurrentRuns
         || blockers.some((other) => other.sessionId === run.sessionId || conflicts(other, run));
-      if (blocked) remaining.push(item);
+      if (blocked) { remaining.push(item); blockers.push(run); }
       else if (!this.stillAuthorized(run)) this.reject(run, 'workspace_not_approved', 'The workspace is no longer approved or no longer resolves to the same directory; nothing was submitted.');
-      else this.launch(run, item.prompt);
-      blockers.push(run);
+      else { this.launch(run, item.prompt); blockers.push(run); }
     }
     this.queue = remaining;
   }
@@ -246,6 +256,11 @@ export class Controller {
       }
       run.finishedAt = now();
       this.changed(run);
+      // A turn that ended with no terminal result leaves its session in doubt: queued follow-ups were
+      // written for a different situation, so Puck decides instead of the queue resuming them.
+      if (!result && run.state === 'failed') {
+        for (const queued of this.runsOf(run.sessionId).filter((other) => other.state === 'queued')) this.cancelRun(queued, 'predecessor_failed', 'The previous turn ended without a result, so this queued turn was dropped without being submitted.');
+      }
       this.pump();
     });
     child.send({
@@ -262,6 +277,7 @@ export class Controller {
       if (run.state !== 'cancelling') run.state = 'running';
       return this.changed(run); // The Droid UUID must be durable before the turn is submitted.
     }
+    if (msg.kind === 'submitted') { run.submittedAt = now(); return this.changed(run); }
     if (msg.kind === 'stderr') run.stderrTail = (run.stderrTail + msg.text).slice(-16000);
     else if (msg.kind === 'event') {
       if (msg.event.type === 'permission_declined') run.permissionsDeclined = (run.permissionsDeclined ?? 0) + 1;
