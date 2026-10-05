@@ -260,12 +260,26 @@ shell arguments or logs. Successful consent must be followed by authenticated
 tool discovery, not assumed from a browser success page.
 
 Controller SDK injection supplies the same connection on create/resume in every
-approved cwd, so no edits to application repositories are needed. Verify actual
-`listTools` returns `amp-puck___puck` allowed and `amp-puck___manage_amp` denied.
-This is model-context filtering, not a narrow OAuth security grant. The actual
+approved cwd, so no edits to application repositories are needed. Before either
+turn, discovery unions all non-Puck `amp-puck___*` IDs with saved disables, updates
+settings and re-lists. Verify `amp-puck___puck` alone is allowed among Amp tools,
+existing disables remain and native tools are not restricted. Failure or
+cancellation must submit no prompt. This is client-side model-context filtering,
+not a narrow OAuth security grant or OS isolation. The actual
 tool supports explicit `params.conversationID` and correlated `params.replyHandle`;
 the URL's threadID alone is not routing proof. Native AskUser is recorded and
 declined; its terminal SDK result does not guarantee interruption or task completion.
+
+Progress is fire-and-forget. Questions/blockers or costly/irreversible steps needing
+steering use one CHECKPOINT with recipient, run/session handles, marker, completed
+evidence, proposed action and decision needed. Consume a completed reply inline or
+read only the returned handle, at most 6 reads without messaging waits; never
+resend or fall back to latest-active/empty params. Without a reply, end BLOCKED
+with the marker, decision and handle, leaving dependent work untouched. Call Puck
+directly in Spec mode, never ExitSpecMode just to message or guess AskUser answers.
+Acceptance/queued/working/silence is not approval; steering stays within existing
+authorization. Wording cannot override off-mode permission cancellation, and mock
+text pins do not establish model obedience. See README.md for the full protocol.
 
 Release a reserved execution slot only after metadata checks and safe migration.
 Have Puck launch separate economical new sessions with unique markers. Require

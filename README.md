@@ -162,9 +162,12 @@ during task execution. The URL alone does not route messages: the actual `puck`
 tool's `params.conversationID` does.
 
 The controller attaches `amp-puck` using SDK `mcpServers` on create **and** resume,
-independent of task cwd or its `.factory` files. `disabledToolIds` denies
-`amp-puck___manage_amp`; readiness refuses other usable Amp tools before submitting
-the prompt. The actual registered `amp-puck___puck` tool must be allowed. An
+independent of task cwd or its `.factory` files. Before each turn it discovers
+tools, unions every `amp-puck___*` ID except exactly `amp-puck___puck` with existing
+`disabledToolIds`, updates settings and re-lists. Restored disables are preserved;
+native tools are not restricted. The actual registered `amp-puck___puck` must be
+allowed and every other Amp tool denied, or no prompt is submitted. Discovery or
+settings errors and cancellation also prevent submission. An
 SDK-injected server can be absent from `listMcpServers` despite successful tool
 discovery, so the registered tool catalog determines readiness.
 
@@ -176,12 +179,22 @@ its recipient, controller run ID and Droid UUID, so routing guidance also applie
 outside this repository. `AGENTS.md` records the same protocol for repository work.
 
 Droid calls `amp-puck___puck` with `{action:"send",params:{conversationID,message}}`.
-For an actual question, it reads the answer with
-`{action:"read_reply",params:{replyHandle}}` using the handle returned by send.
-Queued/working replies require correlated reads, never duplicate sends or the
-latest-active fallback. If no answer is available, it reports the blocker and
-ends the turn; Puck can continue the latest session head. This is requested
-in-turn question/reply coordination, not unsolicited active-turn steering.
+Ordinary coarse progress reports are sent once, fire-and-forget; continue
+authorized independent work without waiting. For an actual question, a material
+blocker, or before an expensive/irreversible step when steering is wanted, send
+one `CHECKPOINT`: explicit recipient, run/session handles, task marker, completed
+evidence, proposed action and exact decision needed. Consume a correlated completed
+reply inline; otherwise queued/working replies use only that send's exact
+`replyHandle` with `read_reply`, at most **6 reads** in the natural tool loop.
+Never resend (including timeout or ambiguous failure), wait solely for messaging,
+or use latest-active/empty-params fallback. Without an answer within the bound,
+end as `BLOCKED` with the marker, decision and handle; leave the dependent action
+untouched. Call Puck directly even in Spec mode, never exit Spec just to message
+or guess AskUser answers. Acceptance/queued/working/silence is not approval; a
+reply steers only that checkpoint within existing task authorization. Prompt
+wording cannot override off-mode permission cancellation. Puck can continue the
+latest session head. This is requested in-turn coordination, not unsolicited
+active-turn steering; wording tests do not prove model obedience.
 
 Agent reports are not automatic controller completion notifications. Crashes,
 cancellation, declined native AskUser or MCP failures can prevent a report;

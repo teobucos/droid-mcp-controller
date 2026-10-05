@@ -75,7 +75,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       reply(req, { settings, cwd, session: { messages: [] } }); break;
     case 'droid.update_session_settings':
       if (p.disabledToolIds && process.env.MOCK_PUCK_FAILURE === 'settings-error') {
-        send({ ...envelope('response'), id: req.id, error: { code: -32000, message: 'Mock lockdown settings failure' } }); return;
+        send({ ...envelope('response'), id: req.id, error: { code: -32603, message: 'Mock lockdown settings failure' } }); return;
       }
       settings = { ...settings, ...p }; persist(); reply(req, {}); break;
     case 'droid.list_mcp_servers':
@@ -84,7 +84,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       toolLists++;
       if (process.env.MOCK_PUCK_FAILURE === 'discovery-pending') return;
       if (process.env.MOCK_PUCK_FAILURE === 'discovery-error' || (process.env.MOCK_PUCK_FAILURE === 'relist-error' && toolLists > 1)) {
-        send({ ...envelope('response'), id: req.id, error: { code: -32000, message: 'Mock tool discovery failure' } }); return;
+        send({ ...envelope('response'), id: req.id, error: { code: -32603, message: 'Mock tool discovery failure' } }); return;
       }
       const tools = profileTools();
       appendFileSync(audit, `${JSON.stringify({ method: 'mock.tool_inventory', tools, mockPid: process.pid })}\n`);

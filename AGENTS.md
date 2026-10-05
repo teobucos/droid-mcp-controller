@@ -26,19 +26,30 @@ delivery without a receipt or confirmation. If Amp MCP is unavailable or rejects
 the message, include that failure in the terminal task result; do not hide it or
 invent a reply. Controller status/result remain the authority for execution state.
 
-If an answer is needed before proceeding, send the actual question and explain
-what is blocked. If `send` reports queued/working, poll `read_reply` with
-`params.replyHandle` returned by that send. Retry reads, never duplicate sends or
-uncorrelated empty reads. This permits a requested answer during the turn; it is
-not unsolicited live steering. If a reply is unavailable, end the turn without
-taking the dependent action. Puck can continue the current session head after
-terminal status. Never guess AskUser answers or infer new approval from silence,
-tool availability or high autonomy.
+Send ordinary coarse progress once, fire-and-forget; never wait for a reply and
+continue authorized independent work. For an actual question, material blocker,
+or before an expensive/irreversible next step when steering is wanted, send ONE
+CHECKPOINT with the explicit recipient, run/session handles, task marker,
+completed evidence, proposed next action and exact decision needed. Consume a
+correlated completed reply inline. If queued/working, use ONLY that send's exact
+`params.replyHandle` with `read_reply`, at most 6 reads in the natural tool loop.
+Never resend, including after timeout or ambiguous failure; never wait solely
+for messaging or use latest-active/empty-params fallback. Without a reply within
+the bound, end as BLOCKED naming the task/checkpoint marker, decision needed and
+replyHandle (or its absence); do not take the dependent action. A reply steers
+only that checkpoint within existing task authorization. Puck can continue the
+current session head after terminal status. Call Puck directly even in Spec mode;
+never call ExitSpecMode merely to message. Prompt wording cannot override off-mode
+permission cancellation. Never guess AskUser answers; acceptance, queued, working
+and silence are not approval. This is requested coordination, not live injection.
 
 The controller attaches the OAuth MCP and this routing context on create/resume
 regardless of task cwd; this file alone does not apply to unrelated repositories.
-Admin-tool filtering is model-context policy, not per-thread OAuth credential
-scoping or protection against an agent with full service-user access.
+Before either turn, it discovers and disables every `amp-puck___*` except exactly
+`amp-puck___puck`, preserving existing disables and native tool availability, then
+re-lists before submission. Errors, ineffective denial or cancellation fail closed.
+Filtering is client-side model-context policy, not per-thread OAuth credential
+scoping, OS isolation or protection against an agent with full service-user access.
 
 ## Git identity and task completion
 
