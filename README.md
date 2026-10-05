@@ -71,7 +71,9 @@ Typical Puck sequence (tool arguments, not shell commands):
    does not prove the task has finished.
 3. Once `terminal` is true, inspect `state`, then retrieve `droid_result`.
    `resultAvailable` means a terminal Droid result was persisted; it is **not**
-   a success flag. Success requires `state: "succeeded"` and a successful outcome.
+   a success flag. SDK execution success requires `state: "succeeded"` and a
+   successful outcome; task completion also requires checking the requested
+   artifacts and unanswered questions. An empty answer is not completion evidence.
 4. Continue only from the newest controller run in the session, with
    `{runId, requestKey:"review-42-followup", model:"YOUR_ENABLED_MODEL_ID",
    autonomy:"off", prompt:"Explain the first finding."}`. Retain the returned
@@ -182,7 +184,7 @@ ends the turn; Puck can continue the latest session head. This is requested
 in-turn question/reply coordination, not unsolicited active-turn steering.
 
 Agent reports are not automatic controller completion notifications. Crashes,
-cancellation, native AskUser interruption or MCP failures can prevent a report;
+cancellation, declined native AskUser or MCP failures can prevent a report;
 Puck must still poll status/result. Message acceptance is not proof of receipt:
 live acceptance requires the unique agent-origin marker to arrive in the intended
 Puck conversation and a correlated reply to reach Droid.
@@ -201,7 +203,7 @@ See [Factory MCP](https://docs.factory.com/cli/configuration/mcp) and
 | --- | --- |
 | `starting`, `running`, `cancelling` | Active; keep polling. `running` means the session is initialized, not that Droid is continuously producing output. |
 | `succeeded` | Matching terminal SDK result has subtype `success`. |
-| `interrupted` | Droid returned a terminal interruption, including declined permissions/questions. |
+| `interrupted` | Matching terminal SDK result has subtype `interrupted`, e.g. cancelled or permission-rejected completion. |
 | `failed` | Terminal agent failure, setup/transport failure, unexpected exit, or invalid result. |
 | `cancelled` | Controller cancelled without receiving a terminal result, usually during setup or after forced process termination. |
 | `timed_out` | Configured wall-clock deadline expired; never inferred from silence. |
@@ -218,8 +220,13 @@ High-autonomy turns record and approve offered single-use permissions with
 `ProceedOnce`, never persistent `ProceedAlways` rules. Other levels decline
 pending permission requests with `Cancel`; high also declines if no single-use
 option is offered. AskUser questions are recorded and declined, not guessed.
-Puck can inspect the context and send a new prompt after interruption. There is
-no interactive permission queue or arbitrary session import.
+SDK 0.9.1 maps a `completed` turn to success even after declined AskUser and with
+empty final text; `cancelled` maps to interruption. The controller preserves that
+SDK outcome, not a judgment that the user's task finished. Inspect recorded
+`ask_user_declined` events and task artifacts before accepting completion. Puck
+can answer the blocked question in a new prompt after terminal status. There is
+no interactive permission queue or arbitrary session import; saved outcomes are
+not rewritten to manufacture a different result.
 
 ## Same-host durability and cleanup
 

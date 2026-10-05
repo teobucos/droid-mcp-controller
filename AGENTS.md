@@ -40,6 +40,22 @@ regardless of task cwd; this file alone does not apply to unrelated repositories
 Admin-tool filtering is model-context policy, not per-thread OAuth credential
 scoping or protection against an agent with full service-user access.
 
+## Git identity and task completion
+
+Use the operator's configured native Git identity. Before committing, inspect
+`git var GIT_AUTHOR_IDENT` and `git var GIT_COMMITTER_IDENT` in the task repository.
+Do not infer an email from history, set a shared global author, change application
+repository identity, or override author/committer environment without approval.
+Private host profiles and the launcher's approved `GH_CONFIG_DIR` select separate
+commit identity and GitHub authentication; direct `gh` does not switch on `cd`.
+Keep linked worktrees in their owning user root. Report missing/mismatched
+configuration to Puck through the actual Amp MCP rather than guessing or copying
+credentials. The controller has no per-turn GitHub account selector.
+
+Terminal SDK success is not proof of task completion. Declined AskUser can still
+finish with SDK success and empty text. Report unanswered questions and verify
+requested artifacts; never describe a blocked publishing task as completed.
+
 ## Controller development
 
 Preserve authenticated HTTP, explicit canonical workspace authorization, durable

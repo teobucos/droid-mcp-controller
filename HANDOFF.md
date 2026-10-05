@@ -25,6 +25,56 @@ Do not replace an existing Droid installation/login unnecessarily. Verify real
 authentication with the smoke below; a version check is not an auth check.
 If login is required, do it privately on the host. Model execution incurs costs.
 
+### Check Git author and GitHub account separately
+
+From each approved repository, run `git var GIT_AUTHOR_IDENT` and
+`git var GIT_COMMITTER_IDENT` before authorizing commits. Use the operator's
+existing configured identity, not an email inferred from commit history or a
+GitHub login. Factory's [0.213.0 release notes](https://docs.factory.com/docs/changelog/releases/0.213.0.json)
+state that Droid uses the configured Git identity; this installation targets
+0.233.0. The [settings](https://docs.factory.com/cli/configuration/settings)
+option `includeCoAuthoredByDroid` controls a co-author trailer, not the primary
+author. It does not fix a missing Git identity.
+
+On a shared HOME, use private native Git conditional includes rather than an
+unconditional global author. For example, append separate entries to the
+existing `~/.gitconfig`, preserving its existing settings:
+
+```gitconfig
+[includeIf "gitdir:/work/alice/"]
+    path = ~/.config/git/identities/alice.gitconfig
+[includeIf "gitdir:/work/bob/"]
+    path = ~/.config/git/identities/bob.gitconfig
+```
+
+Each private profile sets `user.name`, `user.email` and `user.useConfigOnly=true`
+from the authoritative identity. For Git HTTPS authentication, a profile can
+reset `credential.https://github.com.helper` to an empty value, then set it to
+`!GH_CONFIG_DIR=/absolute/existing/account-directory /usr/bin/gh auth git-credential`.
+Use the host's actual `gh` executable and already-approved credential directory;
+never copy tokens into the profile. Repeat for gist only if already configured.
+Keep profiles outside source repositories, with mode 600 and a private parent.
+Existing repository-local overrides retain precedence; do not rewrite application
+`.git/config` or set author/committer environment overrides to bypass them.
+
+[Git 2.47 conditional includes](https://git-scm.com/docs/git-config/2.47.2#_conditional_includes)
+match the actual Git directory, not arbitrary shell cwd. Linked worktrees inherit
+the owning repository's root profile, including canonical symlink paths. Keep
+repositories and their worktrees within the same owner root; a cross-user-root
+worktree does not acquire the destination root's identity. Git 2.47 does not
+support a `worktree:` include condition. Do not treat these profiles as OS isolation.
+
+Direct `gh` commands use the launcher's existing `GH_CONFIG_DIR`; they do not
+switch accounts on `cd`. Launch each runner/controller/Droid process with its
+root's approved environment. The controller's SDK transport inherits that
+environment on create/resume; there is no per-turn account selector. Verify with
+`GH_CONFIG_DIR=/approved/existing/directory gh api user --jq .login` and the Git
+identity commands, without printing credential-store contents or tokens. Token
+environment variables can override stored GitHub credentials; see
+[GitHub CLI environment](https://cli.github.com/manual/gh_help_environment).
+Git reads profile changes on subsequent invocations, so profile-only changes
+need no service restart. None of this expands controller workspace approval.
+
 ## 2. Approve workspace scope and confirm High execution
 
 Create a private state directory **outside** the repositories Droid may edit:
@@ -63,8 +113,9 @@ use a restricted user/container if hard directory containment is required.
 If an explicit reasoning level is required, add `reasoningEffort` supported by
 the chosen Factory model. It is independent of autonomy and applies on start
 and resume; the optional per-turn field overrides it. High autonomy approves
-offered single-use permissions, not persistent rules; questions still interrupt
-instead of guessing answers. Tool discovery shows approvals, default, ceiling,
+offered single-use permissions, not persistent rules; questions are recorded
+and declined instead of guessing answers. Inspect unanswered questions even
+when the SDK reports success. Tool discovery shows approvals, default, ceiling,
 and reasoning.
 Configuration edits require a coordinated restart when no runs are active.
 
@@ -213,7 +264,8 @@ approved cwd, so no edits to application repositories are needed. Verify actual
 `listTools` returns `amp-puck___puck` allowed and `amp-puck___manage_amp` denied.
 This is model-context filtering, not a narrow OAuth security grant. The actual
 tool supports explicit `params.conversationID` and correlated `params.replyHandle`;
-the URL's threadID alone is not routing proof. Native AskUser still interrupts.
+the URL's threadID alone is not routing proof. Native AskUser is recorded and
+declined; its terminal SDK result does not guarantee interruption or task completion.
 
 Release a reserved execution slot only after metadata checks and safe migration.
 Have Puck launch separate economical new sessions with unique markers. Require
