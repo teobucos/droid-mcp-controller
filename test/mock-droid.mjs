@@ -6,7 +6,7 @@ import { createInterface } from 'node:readline';
 
 const home = process.env.MOCK_DROID_HOME;
 const audit = process.env.MOCK_AUDIT;
-let id, cwd, settings, turnId, timer, prompt;
+let id, cwd, settings, turnId, timer, prompt, puckRecipient;
 const tokens = { inputTokens: 7, outputTokens: 3, cacheCreationTokens: 0, cacheReadTokens: 0, thinkingTokens: 0 };
 const send = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
 const envelope = (type) => ({ jsonrpc: '2.0', type, factoryApiVersion: '1.0.0', factoryProtocolVersion: '1.245.0' });
@@ -59,18 +59,21 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       reply(req, { settings, cwd, session: { messages: [] } }); break;
     case 'droid.update_session_settings':
       settings = { ...settings, ...p }; persist(); reply(req, {}); break;
+    case 'droid.list_mcp_tools':
+      reply(req, { tools: [] }); break;
     case 'droid.list_mcp_servers':
+      if (process.env.MOCK_PUCK_FAILURE === 'unlisted') { reply(req, { servers: [], summary: { total: 0, connected: 0, connecting: 0, failed: 0 } }); break; }
       if (process.env.MOCK_PUCK_FAILURE === 'archived') {
         reply(req, { servers: [{ name: 'amp-puck', status: 'failed', error: 'Error POSTing to endpoint: {"error":"This thread is archived"}', source: 'project', isManaged: false, serverType: 'http', requiresAuth: true, hasAuthTokens: true }], summary: { total: 1, connected: 0, connecting: 0, failed: 1 } }); break;
       }
       reply(req, { servers: [{ name: 'amp-puck', status: 'connected', source: 'project', isManaged: false, serverType: 'http', requiresAuth: true, hasAuthTokens: process.env.MOCK_PUCK_FAILURE !== 'unauthenticated' }], summary: { total: 1, connected: 1, connecting: 0, failed: 0 } }); break;
     case 'droid.list_tools':
-      if (process.env.MOCK_PUCK_FAILURE === 'archived') {
+      if (['archived', 'unlisted'].includes(process.env.MOCK_PUCK_FAILURE)) {
         send({ ...envelope('response'), id: req.id, error: { code: -32000, message: 'Unknown tool identifier(s): amp-puck___manage_amp' } }); break;
       }
       reply(req, { tools: ['puck', 'manage_amp'].filter((name) => process.env.MOCK_PUCK_FAILURE !== 'unauthenticated' && !(name === 'puck' && process.env.MOCK_PUCK_FAILURE === 'puck-missing')).map((name) => ({ id: `amp-puck___${name}`, llmId: `amp-puck___${name}`, displayName: name, description: name, category: 'read', defaultAllowed: true, currentlyAllowed: name === 'puck' || process.env.MOCK_PUCK_FAILURE === 'admin-allowed' || !settings.disabledToolIds?.includes(`amp-puck___${name}`) })) }); break;
     case 'droid.add_user_message':
-      turnId = p.messageId; prompt = p.text; reply(req, {});
+      turnId = p.messageId; const text0 = p.text; prompt = p.text.split('\n\n[Controller coordination context]')[0]; reply(req, {});
       const now = Date.now();
       notify({ type: 'create_message', message: { id: turnId, role: 'user', content: [{ type: 'text', text: prompt }], createdAt: now, updatedAt: now } });
       process.stderr.write('mock diagnostic, separate from assistant output\n');
@@ -82,6 +85,10 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (prompt === 'permission' || prompt === 'permission-once') {
         send({ ...envelope('request'), id: 'permission-1', method: 'droid.request_permission', params: { toolUses: [], options: [...(prompt === 'permission-once' ? [{ label: 'Proceed once', value: 'proceed_once' }] : []), { label: 'Cancel', value: 'cancel' }] } }); return;
       }
+      if (prompt.startsWith('puck-permission')) {
+        const recipient = puckRecipient = prompt === 'puck-permission-wrong' ? 'T-99999999-9999-4999-8999-999999999999' : text0.match(/conversationID: (T-[0-9a-f-]{36})/)?.[1];
+        send({ ...envelope('request'), id: 'permission-puck', method: 'droid.request_permission', params: { toolUses: [{ toolUse: { type: 'tool_use', id: 'puck-tool-use', name: 'amp-puck___puck', input: { action: 'send', params: { conversationID: recipient, message: 'mock report' } } }, confirmationType: 'mcp_tool', details: { type: 'mcp_tool', toolName: 'amp-puck___puck', impactLevel: 'low', serverName: 'amp-puck', actualToolName: 'puck' } }], options: [{ label: 'Proceed once', value: 'proceed_once' }, { label: 'Cancel', value: 'cancel' }] } }); return;
+      }
       if (prompt === 'ask') {
         send({ ...envelope('request'), id: 'ask-1', method: 'droid.ask_user', params: { toolCallId: 'ask-tool', questions: [{ index: 1, topic: 'Deploy', question: 'Deploy?', options: ['yes', 'no'] }] } }); return;
       }
@@ -90,7 +97,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         notify({ type: 'create_message', message: { id: randomUUID(), role: 'assistant', content: [{ type: 'tool_use', id: randomUUID(), name: 'LS', input: { directory_path: cwd } }], createdAt: now, updatedAt: now } });
       }
       if (/^puck-(report|wrong|error)/.test(prompt)) {
-        const recipient = prompt.startsWith('puck-wrong') ? 'T-99999999-9999-4999-8999-999999999999' : prompt.match(/conversationID: (T-[0-9a-f-]{36})/)?.[1];
+        const recipient = prompt.startsWith('puck-wrong') ? 'T-99999999-9999-4999-8999-999999999999' : text0.match(/conversationID: (T-[0-9a-f-]{36})/)?.[1];
         const toolUseId = randomUUID();
         const at = Date.now();
         notify({ type: 'create_message', message: { id: randomUUID(), role: 'assistant', content: [{ type: 'tool_use', id: toolUseId, name: 'amp-puck___puck', input: { action: 'send', params: { conversationID: recipient, message: 'mock report' } } }], createdAt: at, updatedAt: at } });
@@ -117,6 +124,14 @@ createInterface({ input: process.stdin }).on('line', (line) => {
           text('single-use permission approved'); terminal('completed');
         } else if (req.result.selectedOption === 'cancel') terminal('permission_rejected');
         else process.exit(12);
+      } else if (req.id === 'permission-puck') {
+        if (req.result.selectedOption === 'proceed_once') {
+          const toolUseId = randomUUID();
+          const at = Date.now();
+          notify({ type: 'create_message', message: { id: randomUUID(), role: 'assistant', content: [{ type: 'tool_use', id: toolUseId, name: 'amp-puck___puck', input: { action: 'send', params: { conversationID: puckRecipient, message: 'mock report' } } }], createdAt: at, updatedAt: at } });
+          notify({ type: 'tool_result', messageId: randomUUID(), toolUseId, content: 'accepted', isError: false });
+          text('puck permission approved'); terminal('completed');
+        } else terminal('permission_rejected');
       } else if (req.id === 'ask-1') {
         if (!req.result.cancelled) process.exit(13);
         terminal('cancelled');

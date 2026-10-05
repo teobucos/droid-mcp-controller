@@ -73,6 +73,39 @@ The mock artifacts prove configuration/protocol wiring only. Live acceptance als
 requires an actual agent-origin message and correlated Puck reply; discovery alone
 cannot prove delivery.
 
+## Session surface failure cases
+
+`test/session-surface.test.mjs` was written before the implementation. Each case names a
+plausible wrong implementation:
+
+- Tools accept unknown arguments, a missing `replyTo`, relative paths, unknown models or
+  unsupported reasoning; errors lack `code/retryable/action` or leak private paths; rejected
+  creates leave a session behind.
+- A Factory UUID, fingerprint, stderr or prompt text appears in a session tool output.
+- Replays create a second session; a changed intent with the same key is accepted; the
+  deprecated `droid_start` replay returns the session head instead of its own run.
+- Default send interrupts, or `interrupt:true` submits the new turn before the interrupt and
+  cleanup, or two turns share a Droid process; cancel leaves queued follow-ups that later run.
+- Capacity is 1 or unbounded; at capacity work is rejected or submitted early; four sessions run
+  serially; results cross between sessions.
+- A writer lets a nested reader, parent reader or symlink spelling run; readers are blocked
+  from sharing; a later reader starves a queued writer; a free global slot skips workspace locks.
+- Mixed autonomy sessions share settings or permission policy; cancel or steer of one session
+  touches another's process.
+- Wait exceeds ten sessions, accepts duplicates or unknown handles, blocks forever on a
+  session that needs attention, or a timeout cancels work.
+- The Amp endpoint binds a thread or recipient; a recipient bleeds between concurrent
+  sessions; detached sessions still touch the endpoint; a report to another conversation is
+  called accepted; the admin tool is not denied.
+- Preflight failures (archived, unauthenticated, tool missing, admin exposed, server dropped
+  from the listing) surface as the masked `Unknown tool identifier(s)` or submit the prompt.
+- A read-only routed session cannot report, or any other permission is approved at a low level.
+- v2 state migrates without a byte-identical backup, retargets recorded recipients, or loses
+  heads and unknown outcomes; a crash replays work, loses `unknown`, or starts queued turns.
+- `docs/TOOLS.md` drifts from the registered schemas (`npm run check`).
+
+Live acceptance on a second instance: `scripts/acceptance.mjs`.
+
 Expected outcomes are independently asserted, including exact final text and
 UUIDs, request settings in a mock wire audit, and real process exit/restart.
 `npm test` emits TAP, suitable for a repeatable handoff artifact.

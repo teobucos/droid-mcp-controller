@@ -28,7 +28,7 @@ function needsAttention(run, note) {
   return ['failed', 'timed_out', 'unknown'].includes(run.state)
     || (run.state === 'interrupted' && !run.cancelRequested)
     || (run.state === 'cancelled' && run.errorCode === 'queue_lost')
-    || (run.questions?.length ?? 0) > 0;
+    || (run.questions?.length ?? 0) > 0 || (run.permissionsDeclined ?? 0) > 0;
 }
 
 export const isWorking = (runs) => runs.some((run) => WORKING.has(run.state));
@@ -48,7 +48,7 @@ export function sessionStatus(session, runs) {
     latestRun: {
       runId: head.runId, state: head.state, terminal: !WORKING.has(head.state), needsAttention: needsAttention(head, note),
       autonomy: head.autonomy, model: head.model ?? null, reasoningEffort: head.reasoningEffort ?? null,
-      error: runError(head), questions: head.questions ?? [],
+      error: runError(head), questions: head.questions ?? [], permissionsDeclined: head.permissionsDeclined ?? 0,
     },
     notification: note,
   };

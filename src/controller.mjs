@@ -249,6 +249,7 @@ export class Controller {
     }
     if (msg.kind === 'stderr') run.stderrTail = (run.stderrTail + msg.text).slice(-16000);
     else if (msg.kind === 'event') {
+      if (msg.event.type === 'permission_declined') run.permissionsDeclined = (run.permissionsDeclined ?? 0) + 1;
       run.events.push({ at: now(), ...msg.event });
       run.events = run.events.slice(-20);
       if (msg.event.type === 'assistant' && typeof msg.event.text === 'string') {

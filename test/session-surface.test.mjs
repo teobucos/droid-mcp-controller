@@ -394,7 +394,8 @@ test('concurrency: parallel sessions, capacity queue, reader/writer workspace lo
     }
     assert.deepEqual(result.sessions.map((s) => s.latestRun.state), ['interrupted', 'interrupted', 'interrupted', 'succeeded']);
     assert.deepEqual(result.sessions.map((s) => s.latestRun.autonomy), levels);
-    assert.ok(result.sessions.slice(0, 3).every((s) => s.latestRun.needsAttention), 'declined permission needs attention');
+    assert.ok(result.sessions.slice(0, 3).every((s) => s.latestRun.needsAttention && s.latestRun.permissionsDeclined === 1), 'declined permission needs attention');
+    assert.equal(result.sessions[3].latestRun.permissionsDeclined, 0);
   });
 
   await t.test('cancel and steer touch only their own session', async () => {
@@ -498,6 +499,23 @@ test('reply-back: per-session recipient, generic endpoint, misroute detection, p
     assert.equal((await h.status(s.metadata.session)).notification.state, 'disabled');
   });
 
+  await t.test('a read-only routed session may approve only its own single-use report; anything else stays denied', async () => {
+    const ok = await h.create('rb-perm-ok', 'puck-permission', { replyTo: PUCK, autonomy: 'off', workspace: h.ws('perm-ok') });
+    const wrong = await h.create('rb-perm-wrong', 'puck-permission-wrong', { replyTo: PUCK, autonomy: 'off', workspace: h.ws('perm-wrong') });
+    const result = await h.settle([ok, wrong].map((s) => s.metadata.session));
+    const answerFor = (session) => {
+      const wire = audit(h);
+      const pid = wire.find((x) => x.method === 'droid.initialize_session' && x.params.cwd.endsWith(session)).mockPid;
+      return wire.find((x) => x.mockPid === pid && x.id === 'permission-puck' && x.type === 'response').result.selectedOption;
+    };
+    assert.equal(answerFor('perm-ok'), 'proceed_once');
+    assert.equal(answerFor('perm-wrong'), 'cancel', 'a report to any other conversation is never approved');
+    assert.equal(result.sessions[0].latestRun.state, 'succeeded');
+    assert.equal(result.sessions[0].notification.state, 'accepted');
+    assert.equal(result.sessions[1].latestRun.state, 'interrupted');
+    assert.equal(result.sessions[1].latestRun.needsAttention, true);
+  });
+
   await t.test('detached sessions never touch the Amp MCP endpoint', async () => {
     const before = audit(h).filter((x) => x.method === 'droid.initialize_session').length;
     const s = await h.create('rb-detached', 'normal', { replyTo: null, workspace: h.ws('detached') });
@@ -511,13 +529,14 @@ test('reply-back: per-session recipient, generic endpoint, misroute detection, p
 test('preflight: actionable Amp MCP failures replace the masked unknown-tool error', async (t) => {
   const cases = [
     ['archived', 'amp_mcp_unreachable', /archived/i],
+    ['unlisted', 'amp_mcp_not_started', /OAuth|sign-in|endpoint URL/i],
     ['unauthenticated', 'amp_mcp_auth_required', /authoriz|sign/i],
     ['puck-missing', 'amp_mcp_tool_missing', /puck/],
     ['admin-allowed', 'amp_mcp_admin_tool_exposed', /manage_amp|admin/i],
   ];
   for (const [mode, code, message] of cases) {
     await t.test(mode, async () => {
-      const h = await fixture({ ampMcp: { url: AMP_URL } }, { MOCK_PUCK_FAILURE: mode });
+      const h = await fixture({ ampMcp: { url: AMP_URL }, runTimeoutMs: 30000 }, { MOCK_PUCK_FAILURE: mode });
       try {
         const created = await h.create(`pre-${mode}`, 'no-echo:must not run', { replyTo: PUCK });
         const status = (await h.settle([created.metadata.session])).sessions[0];

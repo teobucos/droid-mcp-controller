@@ -32,7 +32,7 @@ export const statusShape = z.object({
   latestRun: z.object({
     runId: z.string(), state: z.enum(RUN_STATES), terminal: z.boolean(), needsAttention: z.boolean(),
     autonomy: z.string(), model: z.string().nullable(), reasoningEffort: z.string().nullable(),
-    error: errorShape.nullable(), questions: z.array(z.object({ question: z.string(), options: z.array(z.string()) })).describe('AskUser questions the agent asked and the controller declined; answer them with droid_send_message'),
+    error: errorShape.nullable(), permissionsDeclined: z.number().describe('Tool permissions the controller declined this turn (anything above the autonomy policy). The SDK may still report success after a declined tool, so check this before trusting the output'), questions: z.array(z.object({ question: z.string(), options: z.array(z.string()) })).describe('AskUser questions the agent asked and the controller declined; answer them with droid_send_message'),
   }),
   notification: z.object({ state: z.enum(['disabled', 'pending', 'accepted', 'failed', 'not_sent']).describe('Observed agent-side report to replyTo: disabled = detached; pending = turn still running; accepted = the Amp MCP accepted a report (not proof Puck read it); failed = a report was rejected or misrouted; not_sent = the turn ended without a report'), error: errorShape.nullable() }),
 });

@@ -34,6 +34,16 @@ async function preflightAmpMcp() {
     if (server?.requiresAuth && !server.hasAuthTokens) throw new SetupError('amp_mcp_auth_required', 'The Amp MCP requires authorization that this host has not completed');
     if (server?.status === 'connecting') { await new Promise((resolve) => setTimeout(resolve, 1000)); continue; }
     if (server && server.status !== 'connected') throw new SetupError('amp_mcp_unreachable', `The Amp MCP server is ${server.status}${server.error ? `: ${clean(server.error)}` : ''}`);
+    if (!server) {
+      // Observed live: an injected server that fails to start (no stored OAuth token for
+      // this exact URL, a rejected connection) is dropped from the listing instead of
+      // being reported as failed. Registered tools are then the only signal.
+      const registered = await session.listMcpTools().catch(() => []);
+      if (!registered.some((tool) => JSON.stringify(tool).includes('amp-puck'))) {
+        if (attempt < 8) { await new Promise((resolve) => setTimeout(resolve, 1000)); continue; }
+        throw new SetupError('amp_mcp_not_started', 'The amp-puck MCP server did not start: it is not registered with Droid');
+      }
+    }
     let tools;
     try { tools = await withTimeout(session.listTools(), 15000); } catch (error) {
       throw new SetupError('amp_mcp_setup_failed', `MCP tool discovery failed: ${clean(error.message)}`);
@@ -42,11 +52,18 @@ async function preflightAmpMcp() {
       throw new SetupError('amp_mcp_admin_tool_exposed', 'The Amp MCP exposes a tool other than puck to the agent');
     }
     if (tools.some((tool) => tool.id === PUCK_TOOL && tool.allowed)) return;
-    // SDK-injected servers may not appear in the server listing; a connected one without puck is definitive.
+    // A server that is registered but lacks puck is definitive; an unlisted one may still be registering.
     if (server) throw new SetupError('amp_mcp_tool_missing', 'The Amp MCP is connected but does not expose the puck tool');
     await new Promise((resolve) => setTimeout(resolve, 1000));
   }
   if (!cancelled) throw new SetupError('amp_mcp_unreachable', 'The Amp MCP did not finish connecting in time');
+}
+
+// Only the puck tool, only report-to-recipient or read_reply: nothing broader than the explicit route.
+function isOwnPuckCall(params, replyTo) {
+  const uses = params.toolUses ?? [];
+  return uses.length > 0 && uses.every(({ toolUse, confirmationType }) => confirmationType === 'mcp_tool' && toolUse?.name === PUCK_TOOL
+    && (toolUse.input?.action === 'read_reply' || (toolUse.input?.action === 'send' && toolUse.input?.params?.conversationID === replyTo)));
 }
 
 process.on('message', async (msg) => {
@@ -101,7 +118,9 @@ process.on('message', async (msg) => {
         disabledToolIds: DENIED_TOOLS,
       } : {}),
       permissionHandler(params) {
-        const proceed = run.autonomy === 'high' && params.options.some((option) => option.value === ToolConfirmationOutcome.ProceedOnce);
+        // Routed sessions may always report to their own recipient, even when read-only;
+        // everything else still needs autonomy high, and only ever as a single use.
+        const proceed = (run.autonomy === 'high' || (routed && isOwnPuckCall(params, run.replyTo))) && params.options.some((option) => option.value === ToolConfirmationOutcome.ProceedOnce);
         void event({ type: proceed ? 'permission_approved_once' : 'permission_declined', details: JSON.stringify(params).slice(0, 4000) }).catch(() => {});
         return proceed ? ToolConfirmationOutcome.ProceedOnce : ToolConfirmationOutcome.Cancel;
       },

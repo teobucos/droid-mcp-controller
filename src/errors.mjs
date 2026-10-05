@@ -22,6 +22,7 @@ const ACTIONS = {
   // Run-level failures surfaced as latestRun.error.
   amp_mcp_unreachable: ['The Amp MCP endpoint rejected or could not be reached. Check that ampMcp.url is thread-free and ampcode.com is reachable, then send the message again. No task prompt was submitted.', true],
   amp_mcp_auth_required: ['The controller host has no Amp MCP authorization. The operator must complete the supported OAuth sign-in for amp-puck on the host; then send the message again. No task prompt was submitted.', false],
+  amp_mcp_not_started: ['The amp-puck MCP server did not start. Factory stores Amp OAuth tokens per exact endpoint URL, so the operator must complete the supported sign-in for the configured ampMcp.url on this host; also check that Amp accepts the connection and ampcode.com is reachable. No task prompt was submitted.', false],
   amp_mcp_tool_missing: ['The Amp MCP did not expose the puck tool. Check the Amp MCP endpoint and account, then send the message again. No task prompt was submitted.', true],
   amp_mcp_admin_tool_exposed: ['An Amp admin tool is enabled for the agent, which policy forbids. The operator must fix the tool denial. No task prompt was submitted.', false],
   amp_mcp_setup_failed: ['MCP setup failed before the task started. Retry; if it persists inspect controller stderr. No task prompt was submitted.', true],
