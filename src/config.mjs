@@ -4,6 +4,7 @@ import { z } from 'zod';
 
 export const autonomy = z.enum(['off', 'low', 'medium', 'high']);
 export const reasoning = z.enum(['off', 'none', 'dynamic', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
+export const conversationId = z.string().regex(/^T-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 const absolute = z.string().refine(isAbsolute, 'Use an absolute path (expand ~ yourself)');
 const schema = z.object({
   approvedDirectories: z.array(absolute).min(1),
@@ -13,12 +14,22 @@ const schema = z.object({
   port: z.number().int().min(0).max(65535).default(8787),
   tokenFile: absolute.optional(),
   publicUrl: z.string().url().optional(),
-  maxAutonomy: autonomy.default('off'),
-  defaultAutonomy: autonomy.default('off'),
+  maxAutonomy: autonomy.default('high'),
+  defaultAutonomy: autonomy.default('high'),
   reasoningEffort: reasoning.optional(),
   maxConcurrentRuns: z.number().int().min(1).max(16).default(4),
   runTimeoutMs: z.number().int().min(1000).max(86400000).default(3600000),
   cancelGraceMs: z.number().int().min(100).max(30000).default(5000),
+  modelCacheTtlMs: z.number().int().min(5000).max(600000).default(60000),
+  puck: z.object({
+    conversationId,
+    url: z.string().url().default('https://ampcode.com/mcp?profile=external-agent').refine((value) => {
+      const url = new URL(value);
+      return url.origin === 'https://ampcode.com' && !url.username && !url.password && url.pathname === '/mcp' && !url.hash
+        && url.searchParams.get('profile') === 'external-agent'
+        && [...url.searchParams.keys()].every((key) => ['profile', 'threadID'].includes(key));
+    }, 'Use the credential-free Amp external-agent MCP endpoint'),
+  }).strict().optional(),
 }).strict().refine((config) => autonomy.options.indexOf(config.defaultAutonomy) <= autonomy.options.indexOf(config.maxAutonomy), 'defaultAutonomy cannot exceed maxAutonomy');
 
 export function loadConfig(path) {
@@ -53,4 +64,13 @@ export function approvedWorkspace(config, path) {
     return part === '' || (!isAbsolute(part) && part !== '..' && !part.startsWith(`..${sep}`));
   })) throw new Error('Workspace is outside approved directories');
   return cwd;
+}
+
+// Inputs must already be existing realpath-resolved directories.
+export function pathsOverlap(a, b) {
+  const contains = (root, path) => {
+    const part = relative(root, path);
+    return part === '' || (!isAbsolute(part) && part !== '..' && !part.startsWith(`..${sep}`));
+  };
+  return contains(a, b) || contains(b, a);
 }

@@ -45,7 +45,12 @@ try {
     await client.connect(new StdioClientTransport({ command: process.execPath, args: [fileURLToPath(new URL('../src/server.mjs', import.meta.url)), '--config', values.config], env: process.env, stderr: 'inherit' }));
   }
   report.tools = (await client.listTools()).tools.map((t) => t.name);
-  if (report.tools.length !== 6) throw new Error('Expected six lifecycle tools');
+  if (report.tools.length !== 7 || !report.tools.includes('droid_models')) throw new Error('Expected seven tools including droid_models');
+  if (!values['expect-auth-failure']) {
+    const catalog = await call('droid_models', {});
+    report.catalog = { fetchedAt: catalog.fetchedAt, modelCount: catalog.models.length, ...(values.model ? { selectedModelAvailable: catalog.models.some((model) => model.id === values.model) } : {}) };
+    if (values.model && !report.catalog.selectedModelAvailable) throw new Error('Explicit --model is absent from the current catalog; choose an ID from droid_models');
+  }
   const key = `smoke-${randomUUID()}`;
   const firstArgs = { requestKey: key, workspace: config.approvedDirectories[0], autonomy: 'off', ...(values.model ? { model: values.model } : {}), prompt: 'Reply exactly DROID_MCP_SMOKE_OK. Do not call tools or edit files.' };
   current = await call('droid_start', firstArgs);

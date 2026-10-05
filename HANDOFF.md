@@ -25,7 +25,57 @@ Do not replace an existing Droid installation/login unnecessarily. Verify real
 authentication with the smoke below; a version check is not an auth check.
 If login is required, do it privately on the host. Model execution incurs costs.
 
-## 2. Approve workspace scope and choose a ceiling
+### Check Git author and GitHub account separately
+
+From each approved repository, run `git var GIT_AUTHOR_IDENT` and
+`git var GIT_COMMITTER_IDENT` before authorizing commits. Use the operator's
+existing configured identity, not an email inferred from commit history or a
+GitHub login. Factory's [0.213.0 release notes](https://docs.factory.com/docs/changelog/releases/0.213.0.json)
+state that Droid uses the configured Git identity; this installation targets
+0.233.0. The [settings](https://docs.factory.com/cli/configuration/settings)
+option `includeCoAuthoredByDroid` controls a co-author trailer, not the primary
+author. It does not fix a missing Git identity.
+
+On a shared HOME, use private native Git conditional includes rather than an
+unconditional global author. For example, append separate entries to the
+existing `~/.gitconfig`, preserving its existing settings:
+
+```gitconfig
+[includeIf "gitdir:/work/alice/"]
+    path = ~/.config/git/identities/alice.gitconfig
+[includeIf "gitdir:/work/bob/"]
+    path = ~/.config/git/identities/bob.gitconfig
+```
+
+Each private profile sets `user.name`, `user.email` and `user.useConfigOnly=true`
+from the authoritative identity. For Git HTTPS authentication, a profile can
+reset `credential.https://github.com.helper` to an empty value, then set it to
+`!GH_CONFIG_DIR=/absolute/existing/account-directory /usr/bin/gh auth git-credential`.
+Use the host's actual `gh` executable and already-approved credential directory;
+never copy tokens into the profile. Repeat for gist only if already configured.
+Keep profiles outside source repositories, with mode 600 and a private parent.
+Existing repository-local overrides retain precedence; do not rewrite application
+`.git/config` or set author/committer environment overrides to bypass them.
+
+[Git 2.47 conditional includes](https://git-scm.com/docs/git-config/2.47.2#_conditional_includes)
+match the actual Git directory, not arbitrary shell cwd. Linked worktrees inherit
+the owning repository's root profile, including canonical symlink paths. Keep
+repositories and their worktrees within the same owner root; a cross-user-root
+worktree does not acquire the destination root's identity. Git 2.47 does not
+support a `worktree:` include condition. Do not treat these profiles as OS isolation.
+
+Direct `gh` commands use the launcher's existing `GH_CONFIG_DIR`; they do not
+switch accounts on `cd`. Launch each runner/controller/Droid process with its
+root's approved environment. The controller's SDK transport inherits that
+environment on create/resume; there is no per-turn account selector. Verify with
+`GH_CONFIG_DIR=/approved/existing/directory gh api user --jq .login` and the Git
+identity commands, without printing credential-store contents or tokens. Token
+environment variables can override stored GitHub credentials; see
+[GitHub CLI environment](https://cli.github.com/manual/gh_help_environment).
+Git reads profile changes on subsequent invocations, so profile-only changes
+need no service restart. None of this expands controller workspace approval.
+
+## 2. Approve workspace scope and confirm High execution
 
 Create a private state directory **outside** the repositories Droid may edit:
 
@@ -44,28 +94,39 @@ Edit `config.json` locally. Use actual absolute paths, e.g. `/home/alice/...` or
   "stateDirectory": "/home/alice/.local/state/droid-controller",
   "droidPath": "/home/alice/.local/bin/droid",
   "transport": "stdio",
-  "maxAutonomy": "off"
+  "maxAutonomy": "high",
+  "defaultAutonomy": "high",
+  "modelCacheTtlMs": 60000
 }
 ```
 
-Keep `off` for read-only evaluation. If the user authorizes edits/commands,
-explicitly change the host ceiling to `low`, `medium`, or `high`. A tool request
-cannot exceed that ceiling. New turns default to `defaultAutonomy`, which is
-`off` unless configured. For authorized full Auto execution, set both
-`defaultAutonomy` and `maxAutonomy` to `high`; callers can still explicitly use
-`autonomy:"off"` for read-only work. Inspect project hooks
-and existing Factory MCP configuration first. Approved cwd is not an OS sandbox;
+The owner's execution policy is High/full supported service-user access for
+Droid agents. Source fallbacks and example config both use `defaultAutonomy` and
+`maxAutonomy` equal to `high`; this grants no OS/root privileges. A tool request
+cannot exceed the host ceiling. Callers should explicitly use `autonomy:"off"`
+for read-only work, as the smoke does on both turns. If installing under a lower
+ceiling, also set a compatible `defaultAutonomy` (for example both `off`); an old
+config with only `maxAutonomy:"off"` now needs an explicit off default.
+Inspect project hooks and existing Factory MCP configuration first. Approved cwd is not an OS sandbox;
 use a restricted user/container if hard directory containment is required.
 
 If an explicit reasoning level is required, add `reasoningEffort` supported by
 the chosen Factory model. It is independent of autonomy and applies on start
 and resume; the optional per-turn field overrides it. High autonomy approves
-offered single-use permissions, not persistent rules; questions still interrupt
-instead of guessing answers. Tool discovery shows approvals, default, ceiling,
+offered single-use permissions, not persistent rules; questions are recorded
+and declined instead of guessing answers. Inspect unanswered questions even
+when the SDK reports success. Tool discovery shows approvals, default, ceiling,
 and reasoning.
 Configuration edits require a coordinated restart when no runs are active.
 
 ## 3. Verify real authentication and durable continuation locally
+
+First call `droid_models({})` through the authenticated MCP connection on this
+host. Choose an economical currently returned ID with supported reasoning.
+Never copy an ID from old docs, prior controller history, or another account.
+Discovery uses the authenticated CLI without another Factory API key and
+submits no task prompt. If discovery fails, fix authentication/runtime access
+locally rather than relying on an expired or guessed catalog.
 
 With no other controller owning this state directory:
 
@@ -75,14 +136,17 @@ npm run smoke -- --config "$PWD/config.json" \
   --out "$HOME/.local/state/droid-controller/acceptance.json"
 ```
 
-Replace `YOUR_ENABLED_MODEL_ID` with an economical model verified in the current
-Factory account catalog. The smoke passes it explicitly on both turns.
+Replace `YOUR_ENABLED_MODEL_ID` with the selected `droid_models` ID. The smoke
+fetches the current catalog before launching, verifies the explicit selection,
+and passes `--model` unchanged on both turns; it never guesses a replacement.
+For STDIO-only acceptance, obtain the catalog from a temporary STDIO MCP client,
+close that controller, then run the smoke against the same host config.
 
 Expected: `PASS: real MCP lifecycle smoke; evidence saved`, exit 0. The private
 artifact must show two succeeded runs, matching markers, the **same Droid UUID**,
-different controller run IDs, and `passed: true`. It omits arbitrary assistant
-text/stderr and all credentials. This starts a temporary STDIO controller and
-makes two read-only model calls. Keep acceptance evidence locally; share only
+different controller run IDs, current catalog metadata, and `passed: true`.
+It omits arbitrary assistant text/stderr and all credentials. This starts a
+temporary STDIO controller and makes two read-only model calls. Keep acceptance evidence locally; share only
 the sanitized artifact if desired.
 
 Do not use `--expect-auth-failure` for user-host acceptance. That switch is for
@@ -165,11 +229,64 @@ rotation requires updating both the local token file and stored MCP credential.
 Do not select authentication `none`, recreate a healthy connection, or rotate
 credentials just to upgrade controller source.
 
-Check-server and tool discovery must reveal all six tools. For a connection named
+Check-server and tool discovery must reveal all seven tools, including
+`droid_models`. For a connection named
 **Droid Grokbot**, Puck imports from `droid-grokbot` through `code_exec`, as shown
 in README.md. Run an actual read-only start/result/continue and separate cancel
 through that remote connection: local smoke is not cloud/Puck acceptance proof.
-Retain controller run IDs and poll; there is no completion push.
+Retain controller run IDs and poll; there is no completion push. Continue only
+the newest accepted run in a linear Droid session, never a stale ancestor.
+Non-off turns exclusively lock their canonical workspace tree through cleanup;
+overlapping work rejects immediately with `workspace_busy`. Off readers may
+share overlapping paths, subject to global concurrency.
+
+## 6. Optionally connect Droid back to Puck through Amp OAuth
+
+This is separate from Puck's Bearer connection to the controller. Add private
+`puck: {conversationId, url?}` host configuration as described in README.md;
+the default URL is `https://ampcode.com/mcp?profile=external-agent`. Preserve
+the exact URL used for any existing Factory OAuth authorization. Never place
+personal thread IDs, tokens or private MCP headers in the public repository.
+
+For initial consent, use Factory's supported HTTP MCP configuration and OAuth
+authentication as the same service user, storing credentials in Factory's
+private credential store. The verified SDK flow is
+`session.authenticateMcpServer({serverName:"amp-puck"})`, with no task submitted.
+If the browser runs elsewhere, a loopback redirect refers to that browser's
+machine, not the controller host. Keep the actual authorization attempt and
+callback listener live; use a supported private callback submission/relay rather
+than reusing expired state or an Amp CLI bearer. Do not put codes/tokens into
+shell arguments or logs. Successful consent must be followed by authenticated
+tool discovery, not assumed from a browser success page.
+
+Controller SDK injection supplies the same connection on create/resume in every
+approved cwd, so no edits to application repositories are needed. Before either
+turn, discovery unions all non-Puck `amp-puck___*` IDs with saved disables, updates
+settings and re-lists. Verify `amp-puck___puck` alone is allowed among Amp tools,
+existing disables remain and native tools are not restricted. Failure or
+cancellation must submit no prompt. This is client-side model-context filtering,
+not a narrow OAuth security grant or OS isolation. The actual
+tool supports explicit `params.conversationID` and correlated `params.replyHandle`;
+the URL's threadID alone is not routing proof. Native AskUser is recorded and
+declined; its terminal SDK result does not guarantee interruption or task completion.
+
+Progress is fire-and-forget. Questions/blockers or costly/irreversible steps needing
+steering use one CHECKPOINT with recipient, run/session handles, marker, completed
+evidence, proposed action and decision needed. Consume a completed reply inline or
+read only the returned handle, at most 6 reads without messaging waits; never
+resend or fall back to latest-active/empty params. Without a reply, end BLOCKED
+with the marker, decision and handle, leaving dependent work untouched. Call Puck
+directly in Spec mode, never ExitSpecMode just to message or guess AskUser answers.
+Acceptance/queued/working/silence is not approval; steering stays within existing
+authorization. Wording cannot override off-mode permission cancellation, and mock
+text pins do not establish model obedience. See README.md for the full protocol.
+
+Release a reserved execution slot only after metadata checks and safe migration.
+Have Puck launch separate economical new sessions with unique markers. Require
+actual agent-origin messages in the designated Puck conversation and a reply read
+back by Droid. Record handles and tools used; no application edits, admin calls
+or cloud jobs are needed. Initialize/tool-list success is not message acceptance.
+Status/result remain necessary when a task cannot send a report.
 
 ## Recovery and operational limits
 
@@ -179,6 +296,26 @@ host/profile and expect continuation. The owner lock refuses live/PID-reused
 owners; inspect processes locally before removing a stale lock. If `.startup-lock`
 survives a crash, verify no controller is running before removing that empty
 directory. Never remove locks to run two controllers on the same store.
+
+The first upgraded startup atomically migrates v1 state to v2, removes original
+prompt fields and selects each initial session head by durable acceptance time.
+IDs, fingerprints, outcomes and per-run results stay intact; unknown sessions
+remain blocked. Invalid state/timestamps/heads refuse startup without resetting
+history. Back up stopped private state before upgrading. Inspect head choices
+locally if the old controller allowed misleading branches; the latest accepted
+run, not its parent edges, becomes head. A downgrade needs the matched v1 backup
+and old source. Sensitive prompts may still exist in backups, assistant echoes,
+permission context and Factory's own session history.
+Old result files are deliberately preserved; new result files omit SDK copies
+of submitted user messages, not independently generated assistant output.
+
+Confirm explicit host autonomy policy during upgrade: High/full access supersedes
+the earlier default-off/blanket-permission-decline specification. High approves
+only offered `ProceedOnce`; it does not install persistent permission grants.
+AskUser human decisions are retained as interrupted question context, not guessed.
+Existing accepted keys replay their original autonomy/reasoning despite changed
+defaults. Preserve workspace approvals, bearer authentication and service-user
+boundaries when applying this policy; model discovery never authorizes tools.
 
 A crash without a durable result yields `unknown`; Puck may retrieve context
 but cannot continue that UUID through this server. Inspect saved Droid history
