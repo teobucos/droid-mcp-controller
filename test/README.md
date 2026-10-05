@@ -73,6 +73,18 @@ The mock artifacts prove configuration/protocol wiring only. Live acceptance als
 requires an actual agent-origin message and correlated Puck reply; discovery alone
 cannot prove delivery.
 
+Profile-evolution fixtures add `find_thread`, `read_thread` and an unknown future
+Amp tool between turns. Create and resume must discover, union existing disables
+(including native `Execute`), update and re-list before the first prompt RPC.
+Only `amp-puck___puck` remains allowed among Amp tools; native `Read` stays allowed.
+Ineffective disabling, discovery/settings errors, an already-disabled Puck tool
+and cancellation during discovery must submit zero prompts. Wire artifacts retain
+method ordering and tool availability without prompts or recipient identifiers.
+Coordination text is pinned on both turns: fire-and-forget progress, one checkpoint
+send, exact correlated handle, at most six reads without messaging waits, and a
+BLOCKED result without the dependent action. These pins prove wording and wiring,
+not model obedience or an override of off-mode permission cancellation.
+
 Expected outcomes are independently asserted, including exact final text and
 UUIDs, request settings in a mock wire audit, and real process exit/restart.
 `npm test` emits TAP, suitable for a repeatable handoff artifact.

@@ -6,7 +6,7 @@ import { createInterface } from 'node:readline';
 
 const home = process.env.MOCK_DROID_HOME;
 const audit = process.env.MOCK_AUDIT;
-let id, cwd, settings, turnId, timer, prompt;
+let id, cwd, settings, turnId, timer, prompt, toolLists = 0;
 const tokens = { inputTokens: 7, outputTokens: 3, cacheCreationTokens: 0, cacheReadTokens: 0, thinkingTokens: 0 };
 const send = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
 const envelope = (type) => ({ jsonrpc: '2.0', type, factoryApiVersion: '1.0.0', factoryProtocolVersion: '1.245.0' });
@@ -23,6 +23,19 @@ function persist() {
   writeFileSync(`${home}/${id}.json`, JSON.stringify({ cwd, settings }));
 }
 
+function profileTools() {
+  const names = process.env.MOCK_PUCK_PROFILE ? JSON.parse(readFileSync(process.env.MOCK_PUCK_PROFILE, 'utf8')) : ['puck', 'manage_amp'];
+  const ids = names
+    .filter((name) => process.env.MOCK_PUCK_FAILURE !== 'unauthenticated' && !(name === 'puck' && process.env.MOCK_PUCK_FAILURE === 'puck-missing'))
+    .map((name) => `amp-puck___${name}`);
+  if (process.env.MOCK_PUCK_PROFILE) ids.push('Read', 'Execute');
+  return ids.map((toolId) => ({
+    id: toolId, llmId: toolId, displayName: toolId, description: toolId,
+    category: 'read', defaultAllowed: true,
+    currentlyAllowed: process.env.MOCK_PUCK_FAILURE === 'admin-allowed' || !settings.disabledToolIds?.includes(toolId),
+  }));
+}
+
 if (process.argv.slice(2).join(' ') !== 'exec --input-format stream-jsonrpc --output-format stream-jsonrpc') process.exit(2);
 createInterface({ input: process.stdin }).on('line', (line) => {
   const req = JSON.parse(line);
@@ -35,6 +48,8 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       }
       id = randomUUID(); cwd = p.cwd;
       settings = { modelId: 'mock-model', reasoningEffort: 'off', ...p };
+      if (process.env.MOCK_PUCK_PROFILE) settings.disabledToolIds = [...new Set(['Execute', ...(settings.disabledToolIds ?? [])])];
+      if (process.env.MOCK_PUCK_FAILURE === 'puck-disabled') settings.disabledToolIds = ['amp-puck___puck'];
       if (process.env.MOCK_SLOW_INIT === '1') return;
       // Catalog fixtures are used only by the transient probe in controller state
       // cwd, so sparse/raw catalog fixtures do not alter turn-execution tests.
@@ -55,14 +70,26 @@ createInterface({ input: process.stdin }).on('line', (line) => {
     case 'droid.load_session':
       id = p.sessionId;
       ({ cwd, settings } = JSON.parse(readFileSync(`${home}/${id}.json`, 'utf8')));
+      if (p.disabledToolIds !== undefined) settings.disabledToolIds = p.disabledToolIds;
       if (process.env.MOCK_RESUME_CWD) cwd = process.env.MOCK_RESUME_CWD;
       reply(req, { settings, cwd, session: { messages: [] } }); break;
     case 'droid.update_session_settings':
+      if (p.disabledToolIds && process.env.MOCK_PUCK_FAILURE === 'settings-error') {
+        send({ ...envelope('response'), id: req.id, error: { code: -32000, message: 'Mock lockdown settings failure' } }); return;
+      }
       settings = { ...settings, ...p }; persist(); reply(req, {}); break;
     case 'droid.list_mcp_servers':
       reply(req, { servers: [{ name: 'amp-puck', status: 'connected', source: 'project', isManaged: false, serverType: 'http', requiresAuth: true, hasAuthTokens: process.env.MOCK_PUCK_FAILURE !== 'unauthenticated' }], summary: { total: 1, connected: 1, connecting: 0, failed: 0 } }); break;
-    case 'droid.list_tools':
-      reply(req, { tools: ['puck', 'manage_amp'].filter((name) => process.env.MOCK_PUCK_FAILURE !== 'unauthenticated' && !(name === 'puck' && process.env.MOCK_PUCK_FAILURE === 'puck-missing')).map((name) => ({ id: `amp-puck___${name}`, llmId: `amp-puck___${name}`, displayName: name, description: name, category: 'read', defaultAllowed: true, currentlyAllowed: name === 'puck' || process.env.MOCK_PUCK_FAILURE === 'admin-allowed' || !settings.disabledToolIds?.includes(`amp-puck___${name}`) })) }); break;
+    case 'droid.list_tools': {
+      toolLists++;
+      if (process.env.MOCK_PUCK_FAILURE === 'discovery-pending') return;
+      if (process.env.MOCK_PUCK_FAILURE === 'discovery-error' || (process.env.MOCK_PUCK_FAILURE === 'relist-error' && toolLists > 1)) {
+        send({ ...envelope('response'), id: req.id, error: { code: -32000, message: 'Mock tool discovery failure' } }); return;
+      }
+      const tools = profileTools();
+      appendFileSync(audit, `${JSON.stringify({ method: 'mock.tool_inventory', tools, mockPid: process.pid })}\n`);
+      reply(req, { tools }); break;
+    }
     case 'droid.add_user_message':
       turnId = p.messageId; prompt = p.text; reply(req, {});
       const now = Date.now();

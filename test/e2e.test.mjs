@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, symlinkSync, statSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, symlinkSync, statSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { once } from 'node:events';
@@ -70,6 +71,40 @@ const start = (key, prompt, extra = {}) => call('droid_start', { requestKey: key
 function audit(handle = h) {
   return readFileSync(join(handle.dir, 'audit.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
 }
+
+const evolvedProfile = ['puck', 'manage_amp', 'find_thread', 'read_thread', 'future_read_only'];
+const evolvedDisables = ['Execute', 'amp-puck___manage_amp', 'amp-puck___find_thread', 'amp-puck___read_thread', 'amp-puck___future_read_only'];
+function assertLockedBeforeSubmission(wire, expectedDisables) {
+  assert.equal(wire.filter((r) => r.method === 'droid.add_user_message').length, 1, 'Exactly one prompt after lockdown');
+  const submitted = wire.findIndex((r) => r.method === 'droid.add_user_message');
+  const before = wire.slice(0, submitted);
+  const disabled = before.filter((r) => r.method === 'droid.update_session_settings' && r.params.disabledToolIds).at(-1);
+  assert.ok(disabled, 'Dynamic settings update must precede prompt submission');
+  assert.deepEqual([...disabled.params.disabledToolIds].sort(), [...expectedDisables].sort());
+  assert.ok(wire.every((r) => !Object.hasOwn(r.params ?? {}, 'restrictToolIds')), 'Native tools must not be restricted');
+  const inventories = before.filter((r) => r.method === 'mock.tool_inventory');
+  assert.ok(inventories.length >= 2, 'Discovery and verification must precede prompt submission');
+  assert.ok(before.indexOf(inventories[0]) < before.indexOf(disabled), 'Discover before disabling');
+  const verified = inventories.at(-1);
+  assert.ok(before.indexOf(verified) > before.indexOf(disabled), 'Re-list after disabling');
+  assert.deepEqual(verified.tools.filter((tool) => tool.id.startsWith('amp-puck___') && tool.currentlyAllowed).map((tool) => tool.id), ['amp-puck___puck']);
+  if (expectedDisables.includes('Execute')) {
+    assert.equal(verified.tools.find((tool) => tool.id === 'Read').currentlyAllowed, true);
+    assert.equal(verified.tools.find((tool) => tool.id === 'Execute').currentlyAllowed, false);
+  }
+}
+
+function lockdownArtifact(name, wire) {
+  if (process.env.DROID_E2E_ARTIFACT) writeFileSync(`${process.env.DROID_E2E_ARTIFACT}.${name}.json`, JSON.stringify({
+    live: false, kind: 'mock-lockdown',
+    wire: wire.filter((r) => r.method).map((r) => ({
+      method: r.method,
+      ...(r.params?.disabledToolIds ? { disabledToolIds: r.params.disabledToolIds } : {}),
+      ...(r.tools ? { tools: r.tools.map(({ id, currentlyAllowed }) => ({ id, currentlyAllowed })) } : {}),
+    })),
+  }, null, 2));
+}
+
 function processRunning(pid) {
   try {
     process.kill(pid, 0);
@@ -647,7 +682,10 @@ test('Puck OAuth attachment, explicit routing and admin filtering survive create
     for (const method of ['droid.initialize_session', 'droid.load_session']) {
       const params = wire.find((r) => r.method === method).params;
       assert.deepEqual(params.mcpServers, [{ name: 'amp-puck', type: 'http', url, headers: [], oauth: { resource: 'https://ampcode.com/mcp' } }]);
-      assert.deepEqual(params.disabledToolIds, ['amp-puck___manage_amp']);
+      assert.equal(params.disabledToolIds, undefined, 'Do not override restored disables before discovery');
+      const start = wire.findIndex((r) => r.method === method);
+      const end = wire.findIndex((r, index) => index > start && r.method === 'droid.add_user_message');
+      assertLockedBeforeSubmission(wire.slice(start, end + 1), ['amp-puck___manage_amp']);
     }
     const turns = wire.filter((r) => r.method === 'droid.add_user_message');
     for (const [index, run] of [first, next].entries()) {
@@ -656,6 +694,25 @@ test('Puck OAuth attachment, explicit routing and admin filtering survive create
       assert.ok(turns[index].params.text.includes(next.droidSessionId));
       assert.match(turns[index].params.text, /amp-puck___puck/);
       assert.match(turns[index].params.text, /replyHandle/);
+      // Pins injected wiring/wording on both turns, not model obedience.
+      for (const phrase of [
+        'PROGRESS reports are fire-and-forget', 'never wait for a progress reply',
+        'Send once and continue authorized independent work',
+        'For an actual question, a material blocker, or before an expensive or irreversible next step',
+        'send ONE CHECKPOINT', 'task marker, completed evidence, proposed next action, and the exact decision needed',
+        'Send exactly once per checkpoint; never resend',
+        'queued/working, timeout, or ambiguous failure',
+        'correlated completed reply inline, consume it', 'the exact replyHandle returned by that send',
+        'at most 6 reads', 'natural tool loop', 'Do not use any wait just for messaging',
+        'never use latest-active or empty-params fallback for a checkpoint',
+        'end the turn as BLOCKED', 'task/checkpoint marker', 'surface the replyHandle',
+        'Do not take the dependent action', 'never call ExitSpecMode merely to message Puck',
+        'call the puck tool directly even in Spec mode', 'Never guess AskUser answers',
+        'Acceptance, queued, working, and silence are not approval',
+        "steering for that checkpoint only within the task's existing authorization",
+        'Prompt wording cannot override off-mode permission cancellation',
+      ]) assert.ok(turns[index].params.text.includes(phrase), `Missing coordination rule: ${phrase}`);
+      assert.doesNotMatch(turns[index].params.text, /sleep|10[- ]second|120[- ]second/i);
     }
     assert.ok(!readFileSync(join(handle.dir, 'state/state.json'), 'utf8').includes('report required'));
     if (process.env.DROID_E2E_ARTIFACT) writeFileSync(`${process.env.DROID_E2E_ARTIFACT}.puck.json`, JSON.stringify({ live: false, kind: 'mock-protocol', start: first.runId, continuation: next.runId, session: next.droidSessionId, mcpAttachedOnCreateAndResume: true, adminToolDenied: true, recipientCorrelated: true }, null, 2));
@@ -663,7 +720,7 @@ test('Puck OAuth attachment, explicit routing and admin filtering survive create
 });
 
 test('Puck configuration cannot silently route without auth or leave admin tool usable', async () => {
-  for (const mode of ['unauthenticated', 'admin-allowed', 'puck-missing']) {
+  for (const mode of ['unauthenticated', 'admin-allowed', 'puck-missing', 'puck-disabled', 'discovery-error', 'settings-error', 'relist-error']) {
     const handle = await boot({ puck: { conversationId: 'T-11111111-1111-4111-8111-111111111111' } }, { MOCK_PUCK_FAILURE: mode });
     try {
       const run = await call('droid_start', { requestKey: mode, prompt: 'no-echo:do not execute', workspace: join(handle.dir, 'workspace') }, handle);
@@ -675,4 +732,74 @@ test('Puck configuration cannot silently route without auth or leave admin tool 
   try {
     await assert.rejects(call('droid_start', { requestKey: 'no-puck', prompt: 'no-echo:do not route', workspace: join(handle.dir, 'workspace'), puckConversationId: 'T-11111111-1111-4111-8111-111111111111' }, handle), /Puck MCP.*configured/);
   } finally { await stop(handle); rmSync(handle.dir, { recursive: true, force: true }); }
+});
+
+test('lockdown: profile evolution filters create before any prompt submission', async (t) => {
+  const profile = join(mkdtempSync(join(tmpdir(), 'puck-profile-')), 'tools.json');
+  writeFileSync(profile, JSON.stringify(evolvedProfile));
+  const handle = await boot({ puck: { conversationId: `T-${randomUUID()}` } }, { MOCK_PUCK_PROFILE: profile });
+  try {
+    const run = await call('droid_start', { requestKey: 'evolved-create', prompt: 'no-echo:independent task', workspace: join(handle.dir, 'workspace') }, handle);
+    const done = await finish(run.runId, handle);
+    const wire = audit(handle);
+    t.diagnostic(`CREATE state=${done.state}; prompt RPCs=${wire.filter((r) => r.method === 'droid.add_user_message').length}`);
+    assert.equal(done.state, 'succeeded');
+    assertLockedBeforeSubmission(wire, evolvedDisables);
+    lockdownArtifact('lockdown-create', wire);
+  } finally { await stop(handle); rmSync(handle.dir, { recursive: true, force: true }); rmSync(resolve(profile, '..'), { recursive: true, force: true }); }
+});
+
+test('lockdown: profile evolution filters resume and preserves restored disables', async (t) => {
+  const profile = join(mkdtempSync(join(tmpdir(), 'puck-profile-')), 'tools.json');
+  writeFileSync(profile, JSON.stringify(['puck', 'manage_amp']));
+  const handle = await boot({ puck: { conversationId: `T-${randomUUID()}` } }, { MOCK_PUCK_PROFILE: profile });
+  try {
+    const first = await call('droid_start', { requestKey: 'evolved-first', prompt: 'no-echo:first task', workspace: join(handle.dir, 'workspace') }, handle);
+    const initial = await finish(first.runId, handle);
+    assert.equal(initial.state, 'succeeded');
+    // Saved native disables exist independently of the filtering implementation.
+    assert.ok(JSON.parse(readFileSync(join(handle.dir, `mock/${initial.droidSessionId}.json`), 'utf8')).settings.disabledToolIds.includes('Execute'));
+    writeFileSync(profile, JSON.stringify(evolvedProfile));
+    const next = await call('droid_continue', { runId: first.runId, requestKey: 'evolved-resume', prompt: 'no-echo:next task' }, handle);
+    const done = await finish(next.runId, handle);
+    const wire = audit(handle);
+    const resumed = wire.slice(wire.findIndex((r) => r.method === 'droid.load_session'));
+    t.diagnostic(`RESUME state=${done.state}; prompt RPCs=${resumed.filter((r) => r.method === 'droid.add_user_message').length}`);
+    assert.equal(done.state, 'succeeded');
+    assert.equal(done.droidSessionId, initial.droidSessionId);
+    assert.equal(resumed[0].method, 'droid.load_session');
+    assert.equal(resumed[0].params.disabledToolIds, undefined);
+    assertLockedBeforeSubmission(resumed, evolvedDisables);
+    lockdownArtifact('lockdown-resume', resumed);
+  } finally { await stop(handle); rmSync(handle.dir, { recursive: true, force: true }); rmSync(resolve(profile, '..'), { recursive: true, force: true }); }
+});
+
+test('lockdown: denial-resistant profile fails closed with zero prompts; cancellation cannot submit', async (t) => {
+  const profile = join(mkdtempSync(join(tmpdir(), 'puck-profile-')), 'tools.json');
+  writeFileSync(profile, JSON.stringify(evolvedProfile));
+  const handle = await boot({ puck: { conversationId: `T-${randomUUID()}` } }, { MOCK_PUCK_PROFILE: profile, MOCK_PUCK_FAILURE: 'admin-allowed' });
+  try {
+    const run = await call('droid_start', { requestKey: 'resistant-create', prompt: 'no-echo:must not execute', workspace: join(handle.dir, 'workspace') }, handle);
+    const done = await finish(run.runId, handle);
+    const wire = audit(handle);
+    assert.equal(done.state, 'failed');
+    assert.match(done.error, /unapproved Amp tool/);
+    assert.equal(wire.filter((r) => r.method === 'droid.add_user_message').length, 0);
+    t.diagnostic('DENIAL-RESISTANT state=failed; prompt RPCs=0');
+    lockdownArtifact('lockdown-denied', wire);
+  } finally { await stop(handle); rmSync(handle.dir, { recursive: true, force: true }); rmSync(resolve(profile, '..'), { recursive: true, force: true }); }
+  const pending = await boot({ puck: { conversationId: `T-${randomUUID()}` } }, { MOCK_PUCK_FAILURE: 'discovery-pending' });
+  try {
+    const run = await call('droid_start', { requestKey: 'cancel-lockdown', prompt: 'no-echo:must not execute', workspace: join(pending.dir, 'workspace') }, pending);
+    for (let i = 0; i < 150; i++) {
+      if (existsSync(join(pending.dir, 'audit.jsonl')) && audit(pending).some((r) => r.method === 'droid.list_tools')) break;
+      await sleep(30);
+    }
+    assert.ok(audit(pending).some((r) => r.method === 'droid.list_tools'), 'Cancel while discovery is pending');
+    await call('droid_cancel', { runId: run.runId }, pending);
+    assert.equal((await finish(run.runId, pending)).state, 'cancelled');
+    const wire = audit(pending);
+    assert.equal(wire.filter((r) => r.method === 'droid.add_user_message').length, 0);
+    lockdownArtifact('lockdown-cancelled', wire);
+  } finally { await stop(pending); rmSync(pending.dir, { recursive: true, force: true }); }
 });
