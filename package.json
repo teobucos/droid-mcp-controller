@@ -4,12 +4,15 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "engines": { "node": ">=22" },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node src/server.mjs",
-    "test": "node --test --test-concurrency=1 test/e2e.test.mjs",
+    "test": "node --test --test-concurrency=1 test/e2e.test.mjs test/session-surface.test.mjs",
     "smoke": "node scripts/smoke.mjs",
-    "check": "node --check src/server.mjs && node --check src/controller.mjs && node --check src/worker.mjs && node --check src/config.mjs && node --check src/models.mjs"
+    "check": "for f in src/*.mjs scripts/*.mjs; do node --check $f || exit 1; done && node scripts/gen-tool-reference.mjs --check",
+    "docs": "node scripts/gen-tool-reference.mjs"
   },
   "dependencies": {
     "@factory/droid-sdk": "0.9.1",
@@ -17,6 +20,8 @@
     "zod": "3.25.76"
   },
   "overrides": {
-    "@factory/droid-sdk": { "uuid": "11.1.1" }
+    "@factory/droid-sdk": {
+      "uuid": "11.1.1"
+    }
   }
 }

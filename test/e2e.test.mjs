@@ -1,62 +1,23 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, symlinkSync, statSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, symlinkSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
 import { once } from 'node:events';
 import { request } from 'node:http';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { root, token, sleep, boot, stop, audit as auditLog, processRunning } from './harness.mjs';
+const audit = (handle = h) => auditLog(handle);
 
-const root = resolve(import.meta.dirname, '..');
-const token = 'test-only-token-0123456789-abcdefghijkl';
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+// Legacy-alias suite: the seven deprecated tools keep their original contract.
 let h;
-
-async function boot(extra = {}, envExtra = {}, existing) {
-  const dir = existing ?? mkdtempSync(join(tmpdir(), 'droid-mcp-e2e-'));
-  for (const sub of ['workspace', 'workspace-sibling', 'mock']) mkdirSync(join(dir, sub), { recursive: true });
-  writeFileSync(join(dir, 'token'), token, { mode: 0o600 });
-  const config = {
-    approvedDirectories: [join(dir, 'workspace')], stateDirectory: join(dir, 'state'),
-    droidPath: join(root, 'test/mock-droid.mjs'), transport: 'http', port: 0,
-    tokenFile: join(dir, 'token'), maxAutonomy: 'high', defaultAutonomy: 'off', runTimeoutMs: 8000,
-    cancelGraceMs: 400, reasoningEffort: 'high', ...extra,
-  };
-  const configPath = join(dir, 'config.json');
-  writeFileSync(configPath, JSON.stringify(config));
-  chmodSync(config.droidPath, 0o755);
-  const env = { ...process.env, MOCK_DROID_HOME: join(dir, 'mock'), MOCK_AUDIT: join(dir, 'audit.jsonl'), ...envExtra };
-  delete env.FACTORY_API_KEY; // Existing CLI auth must not require an SDK API key.
-  const proc = spawn(process.execPath, ['src/server.mjs', '--config', configPath], { cwd: root, env, stdio: ['pipe', 'pipe', 'pipe'] });
-  let diagnostics = '';
-  proc.stderr.on('data', (b) => { diagnostics += b; });
-  let url;
-  for (let i = 0; i < 150; i++) {
-    url = diagnostics.match(/Listening (http:\/\/127\.0\.0\.1:\d+\/mcp)/)?.[1];
-    if (url) break;
-    if (proc.exitCode !== null) throw new Error(`Startup failed: ${diagnostics}`);
-    await sleep(30);
-  }
-  assert.ok(url, `No listener ready: ${diagnostics}`);
-  const client = new Client({ name: 'puck-e2e', version: '1' });
-  if (!envExtra.MOCK_HTTP_FAULT) await client.connect(new StreamableHTTPClientTransport(new URL(url), { requestInit: { headers: { Authorization: `Bearer ${token}` } } }));
-  return { dir, config, configPath, env, proc, url, client, diagnostics: () => diagnostics };
-}
-async function stop(handle, signal = 'SIGTERM') {
-  await handle.client.close();
-  if (handle.proc.exitCode === null) {
-    handle.proc.kill(signal);
-    await once(handle.proc, 'exit');
-  }
-}
+// Legacy tools report `error` as a plain string with optional code fields.
 async function call(name, args, handle = h) {
   const result = await handle.client.callTool({ name, arguments: args });
   const value = JSON.parse(result.content[0].text);
-  if (result.isError) throw Object.assign(new Error(value.error), value);
+  if (result.isError) throw Object.assign(new Error(typeof value.error === 'string' ? value.error : value.error.message), typeof value.error === 'string' ? value : value.error);
   return value;
 }
 async function finish(runId, handle = h) {
@@ -68,58 +29,14 @@ async function finish(runId, handle = h) {
   throw new Error('Run did not terminate');
 }
 const start = (key, prompt, extra = {}) => call('droid_start', { requestKey: key, prompt, workspace: join(h.dir, 'workspace'), ...extra });
-function audit(handle = h) {
-  return readFileSync(join(handle.dir, 'audit.jsonl'), 'utf8').trim().split('\n').map(JSON.parse);
-}
-
-const evolvedProfile = ['puck', 'manage_amp', 'find_thread', 'read_thread', 'future_read_only'];
-const evolvedDisables = ['Execute', 'amp-puck___manage_amp', 'amp-puck___find_thread', 'amp-puck___read_thread', 'amp-puck___future_read_only'];
-function assertLockedBeforeSubmission(wire, expectedDisables) {
-  assert.equal(wire.filter((r) => r.method === 'droid.add_user_message').length, 1, 'Exactly one prompt after lockdown');
-  const submitted = wire.findIndex((r) => r.method === 'droid.add_user_message');
-  const before = wire.slice(0, submitted);
-  const disabled = before.filter((r) => r.method === 'droid.update_session_settings' && r.params.disabledToolIds).at(-1);
-  assert.ok(disabled, 'Dynamic settings update must precede prompt submission');
-  assert.deepEqual([...disabled.params.disabledToolIds].sort(), [...expectedDisables].sort());
-  assert.ok(wire.every((r) => !Object.hasOwn(r.params ?? {}, 'restrictToolIds')), 'Native tools must not be restricted');
-  const inventories = before.filter((r) => r.method === 'mock.tool_inventory');
-  assert.ok(inventories.length >= 2, 'Discovery and verification must precede prompt submission');
-  assert.ok(before.indexOf(inventories[0]) < before.indexOf(disabled), 'Discover before disabling');
-  const verified = inventories.at(-1);
-  assert.ok(before.indexOf(verified) > before.indexOf(disabled), 'Re-list after disabling');
-  assert.deepEqual(verified.tools.filter((tool) => tool.id.startsWith('amp-puck___') && tool.currentlyAllowed).map((tool) => tool.id), ['amp-puck___puck']);
-  if (expectedDisables.includes('Execute')) {
-    assert.equal(verified.tools.find((tool) => tool.id === 'Read').currentlyAllowed, true);
-    assert.equal(verified.tools.find((tool) => tool.id === 'Execute').currentlyAllowed, false);
-  }
-}
-
-function lockdownArtifact(name, wire) {
-  if (process.env.DROID_E2E_ARTIFACT) writeFileSync(`${process.env.DROID_E2E_ARTIFACT}.${name}.json`, JSON.stringify({
-    live: false, kind: 'mock-lockdown',
-    wire: wire.filter((r) => r.method).map((r) => ({
-      method: r.method,
-      ...(r.params?.disabledToolIds ? { disabledToolIds: r.params.disabledToolIds } : {}),
-      ...(r.tools ? { tools: r.tools.map(({ id, currentlyAllowed }) => ({ id, currentlyAllowed })) } : {}),
-    })),
-  }, null, 2));
-}
-
-function processRunning(pid) {
-  try {
-    process.kill(pid, 0);
-    // An unreaped zombie in an orb cannot execute any work.
-    if (process.platform === 'linux' && readFileSync(`/proc/${pid}/stat`, 'utf8').split(') ')[1].startsWith('Z ')) return false;
-    return true;
-  } catch (error) { if (['ESRCH', 'ENOENT'].includes(error.code)) return false; throw error; }
-}
-
 test('Puck MCP lifecycle, protocol, persistence and security E2E', async (t) => {
   h = await boot();
   t.after(async () => { await stop(h); rmSync(h.dir, { recursive: true, force: true }); });
 
-  await t.test('seven discoverable tools; async/idempotent start and configured read-only defaults', async () => {
-    assert.deepEqual((await h.client.listTools()).tools.map((x) => x.name).sort(), ['droid_cancel', 'droid_continue', 'droid_list', 'droid_models', 'droid_result', 'droid_start', 'droid_status']);
+  await t.test('seven legacy tools remain discoverable beside the session tools; async/idempotent start and configured read-only defaults', async () => {
+    const names = (await h.client.listTools()).tools.map((x) => x.name);
+    for (const name of ['droid_cancel', 'droid_continue', 'droid_list', 'droid_models', 'droid_result', 'droid_start', 'droid_status']) assert.ok(names.includes(name), name);
+    assert.equal(names.length, 17);
     const first = await start('start-one', 'slow');
     assert.equal(first.terminal, false);
     const duplicate = await start('start-one', 'slow');
@@ -327,7 +244,8 @@ test('Puck MCP lifecycle, protocol, persistence and security E2E', async (t) => 
       }
       assert.equal(result.resultAvailable, true);
       assert.equal(result.terminal, false, 'Serial slot is held until process cleanup');
-      await assert.rejects(call('droid_start', { requestKey: 'cleanup-lock', prompt: 'no', workspace: join(separate.dir, 'workspace') }, separate), (error) => error.code === 'workspace_busy' && error.conflictingRunId === run.runId);
+      // Conflicting work no longer fails: it queues behind the lock until cleanup finishes.
+      assert.equal((await call('droid_start', { requestKey: 'cleanup-lock', prompt: 'queued-behind-cleanup', workspace: join(separate.dir, 'workspace') }, separate)).state, 'queued');
       await stop(separate, 'SIGKILL'); await sleep(200);
       separate = await boot({ cancelGraceMs: 3000 }, {}, separate.dir);
       const recovered = await call('droid_result', { runId: run.runId }, separate);
@@ -371,7 +289,7 @@ test('Puck MCP lifecycle, protocol, persistence and security E2E', async (t) => 
     const client = new Client({ name: 'puck-stdio', version: '1' });
     try {
       await client.connect(new StdioClientTransport({ command: process.execPath, args: [join(root, 'src/server.mjs'), '--config', path], stderr: 'pipe' }));
-      assert.equal((await client.listTools()).tools.length, 7);
+      assert.equal((await client.listTools()).tools.length, 17);
       await client.close();
       await sleep(100);
       writeFileSync(join(dir, 'catalog.json'), JSON.stringify([{ id: 'mock-selected', displayName: 'Selected Mock' }]));
@@ -381,8 +299,8 @@ test('Puck MCP lifecycle, protocol, persistence and security E2E', async (t) => 
       const evidence = JSON.parse(readFileSync(join(dir, 'acceptance.json'), 'utf8'));
       assert.equal(evidence.passed, true);
       assert.equal(evidence.runs.length, 2);
-      assert.ok(evidence.runs.every((r) => r.markerMatched && r.state === 'succeeded'));
-      assert.equal(evidence.runs[0].droidSessionId, evidence.runs[1].droidSessionId);
+      assert.ok(evidence.runs.every((r) => r.markerMatched && r.state === 'succeeded' && r.historyAvailable));
+      assert.equal(evidence.runs[0].session, evidence.runs[1].session);
       assert.equal(evidence.catalog.selectedModelAvailable, true);
       assert.equal(evidence.model, 'mock-selected');
       const wire = audit({ dir });
@@ -416,14 +334,15 @@ test('revision: authoritative heads, prompt-free migration and canonical workspa
   const stale = (head) => (error) => error.code === 'not_session_head' && error.headRunId === head;
   let a, b;
 
+  const headOf = (runId) => { const st = state(); return st.sessions[st.runs[runId].sessionId].headRunId; };
   await t.test('ancestor rejection, simultaneous continuation, failed head, and replay', async () => {
     a = await finish((await submit('linear-a', 'normal')).runId, handle);
     const attempts = await Promise.allSettled([resume(a.runId, 'linear-b', 'agent-error'), resume(a.runId, 'linear-race', 'agent-error')]);
     assert.equal(attempts.filter((x) => x.status === 'fulfilled').length, 1);
     b = await finish(attempts.find((x) => x.status === 'fulfilled').value.runId, handle);
     assert.equal(b.state, 'failed');
-    assert.equal(state().version, 2);
-    assert.equal(state().sessionHeads[a.droidSessionId], b.runId);
+    assert.equal(state().version, 3);
+    assert.equal(headOf(a.runId), b.runId);
     await assert.rejects(resume(a.runId, 'stale-failed'), stale(b.runId));
     assert.equal((await resume(a.runId, b.requestKey, 'agent-error')).runId, b.runId, 'Accepted intent replay precedes stale-head rejection');
     const old = handle; await stop(old); handle = await boot({}, {}, old.dir);
@@ -452,10 +371,12 @@ test('revision: authoritative heads, prompt-free migration and canonical workspa
   await t.test('v1 migration uses acceptance time, removes prompts and preserves results/IDs/unknowns', async () => {
     const old = handle; await stop(old);
     const legacy = state();
-    legacy.version = 1; delete legacy.sessionHeads;
+    // Rebuild the v1 shape from the v3 state: no sessions, per-run prompts, no heads.
+    const sessionOf = Object.fromEntries(Object.values(legacy.runs).map((r) => [r.runId, r.sessionId]));
+    legacy.version = 1; delete legacy.sessions; delete legacy.nextSeq;
     // Reverse insertion order and erase parent metadata: migration must use timestamps.
     legacy.runs = Object.fromEntries(Object.entries(legacy.runs).reverse());
-    for (const run of Object.values(legacy.runs)) run.prompt = 'PRIVATE_V1_ORIGINAL_PROMPT';
+    for (const run of Object.values(legacy.runs)) { run.prompt = 'PRIVATE_V1_ORIGINAL_PROMPT'; delete run.sessionId; delete run.replyTo; delete run.disposition; delete run.preview; }
     legacy.runs[b.runId].parentRunId = null;
     legacy.runs[b.runId].createdAt = '2026-10-04T15:00:00.000Z';
     legacy.runs[a.runId].createdAt = '2026-10-04T14:00:00.000Z';
@@ -465,13 +386,15 @@ test('revision: authoritative heads, prompt-free migration and canonical workspa
     legacy.runs[unknownId] = { ...legacy.runs[a.runId], runId: unknownId, requestKey: 'legacy-unknown', droidSessionId: 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb', state: 'unknown', result: false };
     const unknownDescendant = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
     legacy.runs[unknownDescendant] = { ...legacy.runs[unknownId], runId: unknownDescendant, requestKey: 'unknown-descendant', state: 'succeeded', createdAt: '2026-10-04T15:00:00.000Z' };
-    writeFileSync(statePath(), JSON.stringify(legacy));
+    const bytes = JSON.stringify(legacy);
+    writeFileSync(statePath(), bytes);
     const beforeTurns = audit(old).filter((x) => x.method === 'droid.add_user_message').length;
     handle = await boot({}, {}, old.dir);
     const migrated = state();
-    assert.equal(migrated.version, 2);
-    assert.equal(migrated.sessionHeads[a.droidSessionId], b.runId);
-    assert.equal(migrated.sessionHeads[legacy.runs[unknownId].droidSessionId], unknownDescendant);
+    assert.equal(migrated.version, 3);
+    assert.equal(readFileSync(`${statePath()}.v1.bak`, 'utf8'), bytes, 'the v1 file is retained byte-identically');
+    assert.equal(headOf(a.runId), b.runId);
+    assert.equal(headOf(unknownId), unknownDescendant);
     assert.deepEqual(Object.keys(migrated.runs), Object.keys(legacy.runs));
     assert.ok(!readFileSync(statePath(), 'utf8').includes('PRIVATE_V1_ORIGINAL_PROMPT'));
     assert.equal((await call('droid_result', { runId: a.runId }, handle)).text, 'answer:normal');
@@ -483,56 +406,66 @@ test('revision: authoritative heads, prompt-free migration and canonical workspa
     b = await finish((await resume(b.runId, 'migrated-head')).runId, handle);
   });
 
-  await t.test('v2 head is authoritative; corrupt/missing/wrong-family heads and malformed v1 reject without rewriting', async () => {
+  await t.test('v3 head is authoritative; corrupt/missing/wrong-session heads and malformed v1 reject without rewriting', async () => {
     const old = handle; await stop(old);
     const saved = state();
-    saved.sessionHeads[a.droidSessionId] = a.runId;
+    const sessionId = saved.runs[a.runId].sessionId;
+    saved.sessions[sessionId].headRunId = a.runId;
     writeFileSync(statePath(), JSON.stringify(saved));
     handle = await boot({}, {}, old.dir);
     await assert.rejects(resume(b.runId, 'not-inferred'), stale(a.runId));
     await stop(handle);
+    const other = (s) => Object.values(s.runs).find((r) => r.sessionId !== sessionId).runId;
     for (const mutate of [
-      (s) => { delete s.sessionHeads[a.droidSessionId]; },
-      (s) => { s.sessionHeads[a.droidSessionId] = 'ffffffff-ffff-4fff-8fff-ffffffffffff'; },
-      (s) => { s.sessionHeads[a.droidSessionId] = Object.values(s.runs).find((r) => r.droidSessionId !== a.droidSessionId).runId; },
-      (s) => { s.version = 1; delete s.sessionHeads; for (const r of Object.values(s.runs)) r.prompt = 'old'; s.runs[a.runId].createdAt = 'not-a-date'; },
+      (s) => { delete s.sessions[sessionId].headRunId; },
+      (s) => { s.sessions[sessionId].headRunId = 'ffffffff-ffff-4fff-8fff-ffffffffffff'; },
+      (s) => { s.sessions[sessionId].headRunId = other(s); },
+      (s) => { s.runs[a.runId].sessionId = 'ffffffff-ffff-4fff-8fff-ffffffffffff'; },
+      (s) => { s.version = 1; delete s.sessions; delete s.nextSeq; for (const r of Object.values(s.runs)) { r.prompt = 'old'; delete r.sessionId; } s.runs[a.runId].createdAt = 'not-a-date'; },
     ]) {
       const corrupt = structuredClone(saved); mutate(corrupt);
       const bytes = JSON.stringify(corrupt); writeFileSync(statePath(), bytes);
-      await assert.rejects(boot({}, {}, handle.dir), /state|head|createdAt|date/i);
+      await assert.rejects(boot({}, {}, handle.dir), /state|head|createdAt|date|session/i);
       assert.equal(readFileSync(statePath(), 'utf8'), bytes);
     }
     writeFileSync(statePath(), JSON.stringify(saved));
     handle = await boot({}, {}, handle.dir);
   });
 
-  await t.test('readers share, all mutating levels exclude overlap in both orders; nested/symlink and siblings', async () => {
+  await t.test('conflicting work queues instead of failing: readers share, writers exclude in both orders, nested/symlink/siblings', async () => {
     const api = join(handle.dir, 'workspace/packages/api');
     const web = join(handle.dir, 'workspace/packages/web');
     mkdirSync(api, { recursive: true }); mkdirSync(web, { recursive: true });
     symlinkSync(api, join(handle.dir, 'workspace/api-link'));
     const readers = await Promise.all([submit('reader-a', 'slow'), submit('reader-b', 'slow', { workspace: api })]);
-    assert.ok(readers.every((r) => !r.terminal));
-    await assert.rejects(submit('reader-blocks-writer', 'no', { autonomy: 'medium', workspace: api }), (error) => error.code === 'workspace_busy' && readers.some((r) => r.runId === error.conflictingRunId));
+    assert.ok(readers.every((r) => r.state !== 'queued'), 'readers overlap');
+    const blocked = await submit('reader-blocks-writer', 'normal', { autonomy: 'medium', workspace: api });
+    assert.equal(blocked.state, 'queued');
     for (const r of readers) { await call('droid_cancel', { runId: r.runId }, handle); await finish(r.runId, handle); }
+    assert.equal((await finish(blocked.runId, handle)).state, 'succeeded', 'the queued writer runs once the readers are gone');
     for (const autonomy of ['low', 'medium', 'high']) {
       const writer = await submit(`writer-${autonomy}`, 'slow', { autonomy, workspace: api });
       for (const [suffix, workspace, next] of [
         ['same-reader', api, 'off'], ['same-writer', api, 'high'],
         ['parent', join(handle.dir, 'workspace'), 'off'], ['symlink', join(handle.dir, 'workspace/api-link'), 'off'],
-      ]) await assert.rejects(submit(`${autonomy}-${suffix}`, 'no', { autonomy: next, workspace }), (error) => error.code === 'workspace_busy' && error.conflictingRunId === writer.runId && error.workspace === api);
+      ]) {
+        const waiting = await submit(`${autonomy}-${suffix}`, 'normal', { autonomy: next, workspace });
+        assert.equal(waiting.state, 'queued', `${autonomy} writer blocks ${suffix}`);
+        await call('droid_cancel', { runId: waiting.runId }, handle);
+        assert.equal((await call('droid_status', { runId: waiting.runId }, handle)).state, 'cancelled', 'a queued turn cancels without ever starting');
+      }
       const sibling = await submit(`${autonomy}-sibling`, 'normal', { autonomy: 'high', workspace: web });
       assert.equal((await finish(sibling.runId, handle)).state, 'succeeded');
       await call('droid_cancel', { runId: writer.runId }, handle); await finish(writer.runId, handle);
     }
     const parent = await submit('parent-writer', 'slow', { autonomy: 'medium' });
-    await assert.rejects(submit('nested-reader', 'no', { workspace: api }), (error) => error.code === 'workspace_busy' && error.conflictingRunId === parent.runId);
+    assert.equal((await submit('nested-reader', 'normal', { workspace: api })).state, 'queued');
     await call('droid_cancel', { runId: parent.runId }, handle); await finish(parent.runId, handle);
     const released = await submit('released', 'normal', { autonomy: 'medium', workspace: api });
     assert.equal((await finish(released.runId, handle)).state, 'succeeded');
   });
 
-  await t.test('global concurrency still caps shared readers and disjoint writers', async () => {
+  await t.test('global capacity queues shared readers and disjoint writers instead of rejecting', async () => {
     const separate = await boot({ maxConcurrentRuns: 1 });
     try {
       const api = join(separate.dir, 'workspace/api'), web = join(separate.dir, 'workspace/web');
@@ -540,8 +473,10 @@ test('revision: authoritative heads, prompt-free migration and canonical workspa
       for (const autonomy of ['off', 'high']) {
         const args = { requestKey: `one-slot-${autonomy}`, prompt: 'slow', autonomy, workspace: api };
         const run = await call('droid_start', args, separate);
-        await assert.rejects(call('droid_start', { ...args, requestKey: `two-slots-${autonomy}`, workspace: autonomy === 'off' ? api : web }, separate), /maxConcurrentRuns/i);
+        const waiting = await call('droid_start', { ...args, requestKey: `two-slots-${autonomy}`, prompt: 'normal', workspace: autonomy === 'off' ? api : web }, separate);
+        assert.equal(waiting.state, 'queued');
         await call('droid_cancel', { runId: run.runId }, separate); await finish(run.runId, separate);
+        assert.equal((await finish(waiting.runId, separate)).state, 'succeeded', 'the queued turn starts when the slot frees');
       }
     } finally { await stop(separate); rmSync(separate.dir, { recursive: true, force: true }); }
   });
@@ -663,13 +598,13 @@ test('owner-authorized high fallback is Auto/high with single-use approval; expl
   } finally { await stop(handle); rmSync(handle.dir, { recursive: true, force: true }); }
 });
 
-test('Puck OAuth attachment, explicit routing and admin filtering survive create/resume without workspace files', async () => {
+test('legacy aliases: explicit recipient, generic Amp MCP attachment and admin filtering survive create/resume', async () => {
   const conversationId = 'T-11111111-1111-4111-8111-111111111111';
   const other = 'T-22222222-2222-4222-8222-222222222222';
   const url = 'https://ampcode.com/mcp?profile=external-agent';
-  const handle = await boot({ puck: { url, conversationId } });
+  const handle = await boot({ ampMcp: { url } });
   try {
-    const args = { requestKey: 'puck-start', prompt: 'no-echo:report required', workspace: join(handle.dir, 'workspace'), model: 'mock-model' };
+    const args = { requestKey: 'puck-start', prompt: 'no-echo:report required', workspace: join(handle.dir, 'workspace'), model: 'mock-model', puckConversationId: conversationId };
     const first = await call('droid_start', args, handle);
     assert.equal((await finish(first.runId, handle)).state, 'succeeded');
     assert.equal(first.puckConversationId, conversationId);
@@ -677,129 +612,113 @@ test('Puck OAuth attachment, explicit routing and admin filtering survive create
     await assert.rejects(call('droid_start', { ...args, puckConversationId: other }, handle), /different arguments/);
     const next = await call('droid_continue', { runId: first.runId, requestKey: 'puck-next', prompt: 'no-echo:ask Puck', model: 'mock-model', autonomy: 'off' }, handle);
     assert.equal((await finish(next.runId, handle)).state, 'succeeded');
-    assert.equal(next.puckConversationId, conversationId);
+    assert.equal(next.puckConversationId, conversationId, 'continuation keeps the session recipient');
     const wire = audit(handle);
     for (const method of ['droid.initialize_session', 'droid.load_session']) {
       const params = wire.find((r) => r.method === method).params;
       assert.deepEqual(params.mcpServers, [{ name: 'amp-puck', type: 'http', url, headers: [], oauth: { resource: 'https://ampcode.com/mcp' } }]);
-      assert.equal(params.disabledToolIds, undefined, 'Do not override restored disables before discovery');
-      const start = wire.findIndex((r) => r.method === method);
-      const end = wire.findIndex((r, index) => index > start && r.method === 'droid.add_user_message');
-      assertLockedBeforeSubmission(wire.slice(start, end + 1), ['amp-puck___manage_amp']);
+      assert.deepEqual(params.disabledToolIds, method === 'droid.load_session' ? undefined : ['amp-puck___manage_amp', 'amp-puck___find_thread', 'amp-puck___read_thread']);
     }
     const turns = wire.filter((r) => r.method === 'droid.add_user_message');
     for (const [index, run] of [first, next].entries()) {
       assert.ok(turns[index].params.text.includes(conversationId));
       assert.ok(turns[index].params.text.includes(run.runId));
-      assert.ok(turns[index].params.text.includes(next.droidSessionId));
       assert.match(turns[index].params.text, /amp-puck___puck/);
       assert.match(turns[index].params.text, /replyHandle/);
-      // Pins injected wiring/wording on both turns, not model obedience.
       for (const phrase of [
         'PROGRESS reports are fire-and-forget', 'never wait for a progress reply',
-        'Send once and continue authorized independent work',
-        'For an actual question, a material blocker, or before an expensive or irreversible next step',
-        'send ONE CHECKPOINT', 'task marker, completed evidence, proposed next action, and the exact decision needed',
-        'Send exactly once per checkpoint; never resend',
-        'queued/working, timeout, or ambiguous failure',
+        'send ONE CHECKPOINT', 'completed evidence, proposed next action, and the exact decision needed',
+        'Send exactly once per checkpoint; never resend', 'queued/working, timeout, or ambiguous failure',
         'correlated completed reply inline, consume it', 'the exact replyHandle returned by that send',
         'at most 6 reads', 'natural tool loop', 'Do not use any wait just for messaging',
-        'never use latest-active or empty-params fallback for a checkpoint',
-        'end the turn as BLOCKED', 'task/checkpoint marker', 'surface the replyHandle',
+        'never use latest-active or empty-params fallback', 'end the turn as BLOCKED',
         'Do not take the dependent action', 'never call ExitSpecMode merely to message Puck',
-        'call the puck tool directly even in Spec mode', 'Never guess AskUser answers',
-        'Acceptance, queued, working, and silence are not approval',
+        'Never guess AskUser answers', 'Acceptance, queued, working, and silence are not approval',
         "steering for that checkpoint only within the task's existing authorization",
-        'Prompt wording cannot override off-mode permission cancellation',
       ]) assert.ok(turns[index].params.text.includes(phrase), `Missing coordination rule: ${phrase}`);
-      assert.doesNotMatch(turns[index].params.text, /sleep|10[- ]second|120[- ]second/i);
     }
     assert.ok(!readFileSync(join(handle.dir, 'state/state.json'), 'utf8').includes('report required'));
-    if (process.env.DROID_E2E_ARTIFACT) writeFileSync(`${process.env.DROID_E2E_ARTIFACT}.puck.json`, JSON.stringify({ live: false, kind: 'mock-protocol', start: first.runId, continuation: next.runId, session: next.droidSessionId, mcpAttachedOnCreateAndResume: true, adminToolDenied: true, recipientCorrelated: true }, null, 2));
+    // No recipient is ever inferred: an omitted puckConversationId is detached and never touches the endpoint.
+    const detached = await call('droid_start', { requestKey: 'puck-detached', prompt: 'normal', workspace: join(handle.dir, 'workspace') }, handle);
+    assert.equal(detached.puckConversationId, undefined);
+    await finish(detached.runId, handle);
+    assert.equal(audit(handle).filter((r) => r.method === 'droid.initialize_session').at(-1).params.mcpServers, undefined);
+    if (process.env.DROID_E2E_ARTIFACT) writeFileSync(`${process.env.DROID_E2E_ARTIFACT}.puck.json`, JSON.stringify({ live: false, kind: 'mock-protocol', start: first.runId, continuation: next.runId, mcpAttachedOnCreateAndResume: true, adminToolDenied: true, recipientCorrelated: true }, null, 2));
   } finally { await stop(handle); rmSync(handle.dir, { recursive: true, force: true }); }
 });
 
-test('Puck configuration cannot silently route without auth or leave admin tool usable', async () => {
-  for (const mode of ['unauthenticated', 'admin-allowed', 'puck-missing', 'puck-disabled', 'discovery-error', 'settings-error', 'relist-error']) {
-    const handle = await boot({ puck: { conversationId: 'T-11111111-1111-4111-8111-111111111111' } }, { MOCK_PUCK_FAILURE: mode });
+test('Amp MCP preflight cannot silently route without auth or leave the admin tool usable (legacy create)', async () => {
+  for (const mode of ['unauthenticated', 'admin-allowed', 'puck-missing', 'archived']) {
+    const handle = await boot({ ampMcp: {} }, { MOCK_PUCK_FAILURE: mode });
     try {
-      const run = await call('droid_start', { requestKey: mode, prompt: 'no-echo:do not execute', workspace: join(handle.dir, 'workspace') }, handle);
-      assert.equal((await finish(run.runId, handle)).state, 'failed');
+      const run = await call('droid_start', { requestKey: mode, prompt: 'no-echo:do not execute', workspace: join(handle.dir, 'workspace'), puckConversationId: 'T-11111111-1111-4111-8111-111111111111' }, handle);
+      const done = await finish(run.runId, handle);
+      assert.equal(done.state, 'failed');
+      assert.ok(!/Unknown tool identifier/.test(done.error), 'the real cause, not the masked disabled-tool error');
       assert.ok(!audit(handle).some((r) => r.method === 'droid.add_user_message'));
     } finally { await stop(handle); rmSync(handle.dir, { recursive: true, force: true }); }
   }
   const handle = await boot();
   try {
-    await assert.rejects(call('droid_start', { requestKey: 'no-puck', prompt: 'no-echo:do not route', workspace: join(handle.dir, 'workspace'), puckConversationId: 'T-11111111-1111-4111-8111-111111111111' }, handle), /Puck MCP.*configured/);
+    await assert.rejects(call('droid_start', { requestKey: 'no-puck', prompt: 'no-echo:do not route', workspace: join(handle.dir, 'workspace'), puckConversationId: 'T-11111111-1111-4111-8111-111111111111' }, handle), /Amp MCP.*configured/);
   } finally { await stop(handle); rmSync(handle.dir, { recursive: true, force: true }); }
 });
 
-test('lockdown: profile evolution filters create before any prompt submission', async (t) => {
-  const profile = join(mkdtempSync(join(tmpdir(), 'puck-profile-')), 'tools.json');
-  writeFileSync(profile, JSON.stringify(evolvedProfile));
-  const handle = await boot({ puck: { conversationId: `T-${randomUUID()}` } }, { MOCK_PUCK_PROFILE: profile });
+test('merged lockdown: create/resume filter future tools before submission and preserve saved native disables', async () => {
+  const handle = await boot({ ampMcp: {} }, { MOCK_PUCK_FAILURE: 'new-tool' });
   try {
-    const run = await call('droid_start', { requestKey: 'evolved-create', prompt: 'no-echo:independent task', workspace: join(handle.dir, 'workspace') }, handle);
-    const done = await finish(run.runId, handle);
-    const wire = audit(handle);
-    t.diagnostic(`CREATE state=${done.state}; prompt RPCs=${wire.filter((r) => r.method === 'droid.add_user_message').length}`);
-    assert.equal(done.state, 'succeeded');
-    assertLockedBeforeSubmission(wire, evolvedDisables);
-    lockdownArtifact('lockdown-create', wire);
-  } finally { await stop(handle); rmSync(handle.dir, { recursive: true, force: true }); rmSync(resolve(profile, '..'), { recursive: true, force: true }); }
-});
-
-test('lockdown: profile evolution filters resume and preserves restored disables', async (t) => {
-  const profile = join(mkdtempSync(join(tmpdir(), 'puck-profile-')), 'tools.json');
-  writeFileSync(profile, JSON.stringify(['puck', 'manage_amp']));
-  const handle = await boot({ puck: { conversationId: `T-${randomUUID()}` } }, { MOCK_PUCK_PROFILE: profile });
-  try {
-    const first = await call('droid_start', { requestKey: 'evolved-first', prompt: 'no-echo:first task', workspace: join(handle.dir, 'workspace') }, handle);
+    const first = await call('droid_start', { requestKey: 'merged-create', prompt: 'no-echo:first', workspace: join(handle.dir, 'workspace'), puckConversationId: 'T-11111111-1111-4111-8111-111111111111' }, handle);
     const initial = await finish(first.runId, handle);
     assert.equal(initial.state, 'succeeded');
-    // Saved native disables exist independently of the filtering implementation.
-    assert.ok(JSON.parse(readFileSync(join(handle.dir, `mock/${initial.droidSessionId}.json`), 'utf8')).settings.disabledToolIds.includes('Execute'));
-    writeFileSync(profile, JSON.stringify(evolvedProfile));
-    const next = await call('droid_continue', { runId: first.runId, requestKey: 'evolved-resume', prompt: 'no-echo:next task' }, handle);
-    const done = await finish(next.runId, handle);
+    const path = join(handle.dir, 'mock', `${initial.droidSessionId}.json`);
+    const saved = JSON.parse(readFileSync(path, 'utf8'));
+    saved.settings.disabledToolIds.push('Execute');
+    writeFileSync(path, JSON.stringify(saved));
+    const next = await call('droid_continue', { runId: first.runId, requestKey: 'merged-resume', prompt: 'no-echo:next' }, handle);
+    assert.equal((await finish(next.runId, handle)).state, 'succeeded');
     const wire = audit(handle);
-    const resumed = wire.slice(wire.findIndex((r) => r.method === 'droid.load_session'));
-    t.diagnostic(`RESUME state=${done.state}; prompt RPCs=${resumed.filter((r) => r.method === 'droid.add_user_message').length}`);
-    assert.equal(done.state, 'succeeded');
-    assert.equal(done.droidSessionId, initial.droidSessionId);
-    assert.equal(resumed[0].method, 'droid.load_session');
-    assert.equal(resumed[0].params.disabledToolIds, undefined);
-    assertLockedBeforeSubmission(resumed, evolvedDisables);
-    lockdownArtifact('lockdown-resume', resumed);
-  } finally { await stop(handle); rmSync(handle.dir, { recursive: true, force: true }); rmSync(resolve(profile, '..'), { recursive: true, force: true }); }
+    for (const [method, nativeDisabled] of [['droid.initialize_session', false], ['droid.load_session', true]]) {
+      const begin = wire.findIndex((r) => r.method === method);
+      const end = wire.findIndex((r, i) => i > begin && r.method === 'droid.add_user_message');
+      const before = wire.slice(begin, end);
+      assert.ok(end > begin);
+      assert.ok(before.every((r) => !Object.hasOwn(r.params ?? {}, 'restrictToolIds')));
+      const update = before.findLastIndex((r) => r.method === 'droid.update_session_settings' && r.params.disabledToolIds);
+      const inventory = before.findLastIndex((r) => r.method === 'mock.tool_inventory');
+      assert.ok(before.findIndex((r) => r.method === 'mock.tool_inventory') < update && update < inventory, 'discover, union, then verify before the prompt');
+      const expected = ['amp-puck___manage_amp', 'amp-puck___find_thread', 'amp-puck___read_thread', 'amp-puck___brand_new_tool', ...(nativeDisabled ? ['Execute'] : [])];
+      assert.deepEqual([...before[update].params.disabledToolIds].sort(), expected.sort());
+      const tools = before[inventory].tools;
+      assert.deepEqual(tools.filter((r) => r.id.startsWith('amp-puck___') && r.currentlyAllowed).map((r) => r.id), ['amp-puck___puck']);
+      assert.equal(tools.find((r) => r.id === 'Read').currentlyAllowed, true);
+      assert.equal(tools.find((r) => r.id === 'Execute').currentlyAllowed, !nativeDisabled);
+    }
+  } finally { await stop(handle); rmSync(handle.dir, { recursive: true, force: true }); }
 });
 
-test('lockdown: denial-resistant profile fails closed with zero prompts; cancellation cannot submit', async (t) => {
-  const profile = join(mkdtempSync(join(tmpdir(), 'puck-profile-')), 'tools.json');
-  writeFileSync(profile, JSON.stringify(evolvedProfile));
-  const handle = await boot({ puck: { conversationId: `T-${randomUUID()}` } }, { MOCK_PUCK_PROFILE: profile, MOCK_PUCK_FAILURE: 'admin-allowed' });
-  try {
-    const run = await call('droid_start', { requestKey: 'resistant-create', prompt: 'no-echo:must not execute', workspace: join(handle.dir, 'workspace') }, handle);
-    const done = await finish(run.runId, handle);
-    const wire = audit(handle);
-    assert.equal(done.state, 'failed');
-    assert.match(done.error, /unapproved Amp tool/);
-    assert.equal(wire.filter((r) => r.method === 'droid.add_user_message').length, 0);
-    t.diagnostic('DENIAL-RESISTANT state=failed; prompt RPCs=0');
-    lockdownArtifact('lockdown-denied', wire);
-  } finally { await stop(handle); rmSync(handle.dir, { recursive: true, force: true }); rmSync(resolve(profile, '..'), { recursive: true, force: true }); }
-  const pending = await boot({ puck: { conversationId: `T-${randomUUID()}` } }, { MOCK_PUCK_FAILURE: 'discovery-pending' });
-  try {
-    const run = await call('droid_start', { requestKey: 'cancel-lockdown', prompt: 'no-echo:must not execute', workspace: join(pending.dir, 'workspace') }, pending);
-    for (let i = 0; i < 150; i++) {
-      if (existsSync(join(pending.dir, 'audit.jsonl')) && audit(pending).some((r) => r.method === 'droid.list_tools')) break;
-      await sleep(30);
-    }
-    assert.ok(audit(pending).some((r) => r.method === 'droid.list_tools'), 'Cancel while discovery is pending');
-    await call('droid_cancel', { runId: run.runId }, pending);
-    assert.equal((await finish(run.runId, pending)).state, 'cancelled');
-    const wire = audit(pending);
-    assert.equal(wire.filter((r) => r.method === 'droid.add_user_message').length, 0);
-    lockdownArtifact('lockdown-cancelled', wire);
-  } finally { await stop(pending); rmSync(pending.dir, { recursive: true, force: true }); }
+test('merged lockdown: discovery/settings errors and disabled Puck fail closed; discovery cancellation submits nothing', async () => {
+  for (const mode of ['discovery-error', 'settings-error', 'puck-disabled', 'discovery-pending']) {
+    const handle = await boot({ ampMcp: {} }, { MOCK_PUCK_FAILURE: mode });
+    try {
+      const args = { requestKey: `merged-${mode}`, prompt: 'no-echo:must not run', workspace: join(handle.dir, 'workspace'), puckConversationId: 'T-11111111-1111-4111-8111-111111111111' };
+      let run = await call('droid_start', mode === 'puck-disabled' ? { ...args, prompt: 'normal' } : args, handle);
+      let priorPrompts = 0;
+      if (mode === 'puck-disabled') {
+        const done = await finish(run.runId, handle);
+        const path = join(handle.dir, 'mock', `${done.droidSessionId}.json`);
+        const saved = JSON.parse(readFileSync(path, 'utf8'));
+        saved.settings.disabledToolIds.push('amp-puck___puck');
+        writeFileSync(path, JSON.stringify(saved));
+        run = await call('droid_continue', { runId: run.runId, requestKey: 'merged-disabled-resume', prompt: args.prompt }, handle);
+        priorPrompts = 1;
+      }
+      if (mode === 'discovery-pending') {
+        for (let i = 0; i < 150 && !audit(handle).some((r) => r.method === 'droid.list_tools'); i++) await sleep(30);
+        assert.ok(audit(handle).some((r) => r.method === 'droid.list_tools'));
+        await call('droid_cancel', { runId: run.runId }, handle);
+      }
+      assert.equal((await finish(run.runId, handle)).state, mode === 'discovery-pending' ? 'cancelled' : 'failed', mode);
+      assert.equal(audit(handle).filter((r) => r.method === 'droid.add_user_message').length, priorPrompts);
+    } finally { await stop(handle); rmSync(handle.dir, { recursive: true, force: true }); }
+  }
 });

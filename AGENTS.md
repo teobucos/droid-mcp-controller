@@ -15,9 +15,9 @@ not root privileges, access to another user's workspace, or OS isolation.
 When Puck asks for a report, question or progress update, use the connected Amp
 MCP tool `amp-puck___puck`. Its verified actions are `send` and `read_reply`.
 Use `send` with `params.message` and the launch context's explicit
-`params.conversationID`; never use the latest-active default. Do not use
+`params.conversationID` (the session's `replyTo`); never use the latest-active default. Do not use
 `manage_amp` or Amp CLI messaging. Inspect the actual schema if it changes.
-Include the controller run/session handles when supplied and the task's unique
+Include the controller session/run handles when supplied and the task's unique
 correlation marker. Keep messages concise: findings, evidence, remaining work and
 the specific decision needed.
 
@@ -37,19 +37,21 @@ Never resend, including after timeout or ambiguous failure; never wait solely
 for messaging or use latest-active/empty-params fallback. Without a reply within
 the bound, end as BLOCKED naming the task/checkpoint marker, decision needed and
 replyHandle (or its absence); do not take the dependent action. A reply steers
-only that checkpoint within existing task authorization. Puck can continue the
-current session head after terminal status. Call Puck directly even in Spec mode;
-never call ExitSpecMode merely to message. Prompt wording cannot override off-mode
+only that checkpoint within existing task authorization. Puck can send a follow-up
+message to the session after it settles. Call Puck directly even in Spec mode;
+never call ExitSpecMode merely to message. Prompt wording cannot override
 permission cancellation. Never guess AskUser answers; acceptance, queued, working
 and silence are not approval. This is requested coordination, not live injection.
 
 The controller attaches the OAuth MCP and this routing context on create/resume
-regardless of task cwd; this file alone does not apply to unrelated repositories.
-Before either turn, it discovers and disables every `amp-puck___*` except exactly
-`amp-puck___puck`, preserving existing disables and native tool availability, then
-re-lists before submission. Errors, ineffective denial or cancellation fail closed.
-Filtering is client-side model-context policy, not per-thread OAuth credential
-scoping, OS isolation or protection against an agent with full service-user access.
+for routed sessions (non-null `replyTo`) regardless of task cwd; this file alone does
+not apply to unrelated repositories. The controller records whether you reported
+(`notification`); a report to any other conversation is flagged `reply_misrouted`.
+Before either turn, it discovers and disables every other Amp tool, preserving
+existing disables and native tool availability, then re-lists before submission.
+Errors, ineffective denial or cancellation fail closed. Filtering is client-side
+model-context policy, not per-thread OAuth credential scoping, OS isolation or
+protection against an agent with full service-user access.
 
 ## Git identity and task completion
 
@@ -70,7 +72,11 @@ requested artifacts; never describe a blocked publishing task as completed.
 ## Controller development
 
 Preserve authenticated HTTP, explicit canonical workspace authorization, durable
-request-key idempotency, linear sessions and fail-closed ambiguous outcomes. Never
+request-key idempotency, linear sessions and fail-closed ambiguous outcomes. Keep
+`src/tools.mjs` the single source of tool schemas and descriptions and run
+`npm run docs` after changing them. Never reintroduce a default recipient or a
+thread-bound Amp endpoint; admission (capacity, session serialization, workspace
+locks) lives only in `Controller.pump()`. Never
 automatically replay accepted work after a crash. Hold execution/workspace slots
 until worker and Droid cleanup finish.
 

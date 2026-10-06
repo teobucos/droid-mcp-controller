@@ -1,5 +1,6 @@
 import { DroidClient, ProcessTransport, ToolConfirmationOutcome } from '@factory/droid-sdk/node';
 import { z } from 'zod';
+import { ToolError } from './errors.mjs';
 
 const catalogSchema = z.array(z.object({
   id: z.string().min(1), displayName: z.string().min(1), disabled: z.boolean().optional(),
@@ -18,7 +19,7 @@ export class ModelCatalog {
   }
 
   async get() {
-    if (this.stopping) throw new Error('Controller is shutting down');
+    if (this.stopping) throw new ToolError('shutting_down', 'Controller is shutting down');
     if (this.cache && performance.now() - this.cache.at < this.config.modelCacheTtlMs) return this.cache.value;
     // All HTTP MCP instances share this cache and one in-flight refresh.
     this.pending ??= this.discover().then((value) => {
@@ -26,7 +27,7 @@ export class ModelCatalog {
       return value;
     }).catch((error) => {
       console.error('Factory model discovery failed:', error);
-      throw Object.assign(new Error('Unable to retrieve the current Factory model catalog'), { code: 'model_discovery_failed' });
+      throw new ToolError('model_discovery_failed', 'Unable to retrieve the current Factory model catalog');
     }).finally(() => { this.pending = null; });
     return this.pending;
   }

@@ -5,5 +5,7 @@
   "transport": "stdio",
   "maxAutonomy": "high",
   "defaultAutonomy": "high",
-  "modelCacheTtlMs": 60000
+  "maxConcurrentRuns": 4,
+  "modelCacheTtlMs": 60000,
+  "ampMcp": {}
 }

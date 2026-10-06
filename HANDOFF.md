@@ -229,60 +229,65 @@ rotation requires updating both the local token file and stored MCP credential.
 Do not select authentication `none`, recreate a healthy connection, or rotate
 credentials just to upgrade controller source.
 
-Check-server and tool discovery must reveal all seven tools, including
-`droid_models`. For a connection named
-**Droid Grokbot**, Puck imports from `droid-grokbot` through `code_exec`, as shown
-in README.md. Run an actual read-only start/result/continue and separate cancel
-through that remote connection: local smoke is not cloud/Puck acceptance proof.
-Retain controller run IDs and poll; there is no completion push. Continue only
-the newest accepted run in a linear Droid session, never a stale ancestor.
-Non-off turns exclusively lock their canonical workspace tree through cleanup;
-overlapping work rejects immediately with `workspace_busy`. Off readers may
-share overlapping paths, subject to global concurrency.
+Check-server and tool discovery must reveal the 11 session tools
+(`droid_create_session` ... `droid_models`) plus the six deprecated aliases
+(17 tools; `droid_models` is shared). For a connection named **Droid Grokbot**, Puck
+imports from `droid-grokbot` through `code_exec`, as in README.md and
+[docs/TOOLS.md](docs/TOOLS.md). Run an actual read-only create/wait/read/send and a
+separate cancel through that remote connection: local smoke is not cloud/Puck
+acceptance proof. Keep session handles; use `droid_wait_for_sessions` (bounded
+joins) rather than polling. There is no completion push.
+Non-off turns lock their canonical workspace tree through cleanup; conflicting
+work queues FIFO (it is never submitted early). Off readers may share overlapping
+paths. Capacity defaults to 4 (`maxConcurrentRuns`, 1 to 16) and is reported by
+`droid_list_workspaces`. For a cutover from the old service see
+[docs/CUTOVER.md](docs/CUTOVER.md); state and recovery are in
+[docs/STATE-MIGRATION.md](docs/STATE-MIGRATION.md).
 
 ## 6. Optionally connect Droid back to Puck through Amp OAuth
 
 This is separate from Puck's Bearer connection to the controller. Add private
-`puck: {conversationId, url?}` host configuration as described in README.md;
-the default URL is `https://ampcode.com/mcp?profile=external-agent`. Preserve
-the exact URL used for any existing Factory OAuth authorization. Never place
-personal thread IDs, tokens or private MCP headers in the public repository.
+`"ampMcp": {}` host configuration (README.md). The endpoint is the generic
+`https://ampcode.com/mcp?profile=external-agent`: it must not carry a `threadID`, and the
+old `puck: {conversationId, url?}` key is rejected at startup. Recipients are chosen per
+session with `replyTo`; no host default exists. Never place personal thread IDs, tokens
+or private MCP headers in the public repository.
 
-For initial consent, use Factory's supported HTTP MCP configuration and OAuth
-authentication as the same service user, storing credentials in Factory's
-private credential store. The verified SDK flow is
-`session.authenticateMcpServer({serverName:"amp-puck"})`, with no task submitted.
-If the browser runs elsewhere, a loopback redirect refers to that browser's
-machine, not the controller host. Keep the actual authorization attempt and
-callback listener live; use a supported private callback submission/relay rather
-than reusing expired state or an Amp CLI bearer. Do not put codes/tokens into
-shell arguments or logs. Successful consent must be followed by authenticated
-tool discovery, not assumed from a browser success page.
+**Factory stores the Amp OAuth token per exact endpoint URL**, so the sign-in must be
+done once for this URL, as the service user, in Factory's private credential store. Use
+`node scripts/amp-signin.mjs --config <config> --dir <private dir>`: it drives
+`session.authenticateMcpServer({serverName:"amp-puck"})` through a throwaway
+project-level definition, writes the authorization link to a mode-600 file and delivers
+the owner's pasted callback URL to Factory's loopback listener. If the browser runs
+elsewhere, a loopback redirect refers to that browser's machine; hence the paste step.
+Do not put codes/tokens into shell arguments or logs, and back up the credential store first
+(see docs/CUTOVER.md). Successful consent must be followed by authenticated tool
+discovery (a routed session reaching `notification: accepted`), not assumed from a
+browser success page.
 
 Controller SDK injection supplies the same connection on create/resume in every
-approved cwd, so no edits to application repositories are needed. Before either
-turn, discovery unions all non-Puck `amp-puck___*` IDs with saved disables, updates
-settings and re-lists. Verify `amp-puck___puck` alone is allowed among Amp tools,
-existing disables remain and native tools are not restricted. Failure or
-cancellation must submit no prompt. This is client-side model-context filtering,
-not a narrow OAuth security grant or OS isolation. The actual
+approved cwd, so no edits to application repositories are needed. The controller's preflight verifies, before any task prompt, that
+`listTools` returns `amp-puck___puck` allowed and only `puck` usable (every other Amp tool default-denied).
+Saved disables are preserved; native tools are not restricted. Discovery/settings
+errors and cancellation submit no prompt. This is client-side model-context
+filtering, not a narrow OAuth security grant or OS isolation. The actual
 tool supports explicit `params.conversationID` and correlated `params.replyHandle`;
-the URL's threadID alone is not routing proof. Native AskUser is recorded and
-declined; its terminal SDK result does not guarantee interruption or task completion.
+the URL's threadID alone is not routing proof. Native AskUser is recorded
+(`latestRun.questions`) and declined; its terminal SDK result does not guarantee
+interruption or task completion, so check `needsAttention`.
 
-Progress is fire-and-forget. Questions/blockers or costly/irreversible steps needing
-steering use one CHECKPOINT with recipient, run/session handles, marker, completed
-evidence, proposed action and decision needed. Consume a completed reply inline or
-read only the returned handle, at most 6 reads without messaging waits; never
-resend or fall back to latest-active/empty params. Without a reply, end BLOCKED
-with the marker, decision and handle, leaving dependent work untouched. Call Puck
-directly in Spec mode, never ExitSpecMode just to message or guess AskUser answers.
-Acceptance/queued/working/silence is not approval; steering stays within existing
-authorization. Wording cannot override off-mode permission cancellation, and mock
-text pins do not establish model obedience. See README.md for the full protocol.
+Progress is fire-and-forget. Steering uses one CHECKPOINT with recipient,
+session/run handles, marker, completed evidence, proposed action and decision needed.
+Consume a completed reply inline or read only the returned handle, at most 6 reads
+without messaging waits; never resend or fall back to latest-active/empty params.
+Without a reply, end BLOCKED with marker, decision and handle, leaving dependent work
+untouched. Call Puck directly in Spec mode, never ExitSpecMode just to message or
+guess AskUser answers. Acceptance/queued/working/silence is not approval; steering
+stays within existing authorization. Wording cannot override permission cancellation,
+and mock text pins do not establish model obedience. See README.md for the full protocol.
 
 Release a reserved execution slot only after metadata checks and safe migration.
-Have Puck launch separate economical new sessions with unique markers. Require
+Have Puck launch separate economical sessions with unique markers and `replyTo` set. Require
 actual agent-origin messages in the designated Puck conversation and a reply read
 back by Droid. Record handles and tools used; no application edits, admin calls
 or cloud jobs are needed. Initialize/tool-list success is not message acceptance.
