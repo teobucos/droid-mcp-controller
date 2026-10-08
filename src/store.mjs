@@ -90,10 +90,11 @@ function toV3(state) {
       if (run.droidSessionId) byDroid.set(run.droidSessionId, session);
     }
     run.sessionId = session.sessionId;
+    run.fingerprintVersion = 2; // v1/v2 aliases keep their original comparison contract.
     run.replyTo = run.puckConversationId ?? null;
     delete run.puckConversationId;
     run.preview = run.textTail.slice(-4000);
-    if (run.droidSessionId || run.result) run.submittedAt = run.createdAt; // legacy: the prompt reached Droid once a session existed
+    if (run.droidSessionId || run.result) run.submittedAt = run.createdAt; // legacy approximation, not proof of submission
     session.headRunId = state.sessionHeads[run.droidSessionId] ?? run.runId;
     session.updatedAt = run.updatedAt ?? run.createdAt;
   }

@@ -4,9 +4,10 @@ import { ToolError } from './errors.mjs';
 
 const catalogSchema = z.array(z.object({
   id: z.string().min(1), displayName: z.string().min(1), disabled: z.boolean().optional(),
+  deprecated: z.boolean().optional(),
   provider: z.string().optional(), modelProvider: z.string().optional(),
   supportedReasoningEfforts: z.array(z.string()).optional(), defaultReasoningEffort: z.string().optional(),
-  supportsImages: z.boolean().optional(), noImageSupport: z.boolean().optional(), supportsPdfs: z.boolean().optional(),
+  supportsImages: z.boolean().optional(), noImageSupport: z.boolean().optional(), supportsPdfs: z.boolean().optional(), supportsPDFs: z.boolean().optional(),
 }));
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 
@@ -38,15 +39,23 @@ export class ModelCatalog {
       env: { FACTORY_DROID_AUTO_UPDATE_ENABLED: 'false' },
     });
     let catalog;
+    let initializeId;
+    const send = transport.send.bind(transport);
+    transport.send = (line) => {
+      const request = JSON.parse(line);
+      if (request.type === 'request' && request.method === 'droid.initialize_session') initializeId = request.id;
+      return send(line);
+    };
     const onMessage = transport.onMessage.bind(transport);
     transport.onMessage = (handler) => onMessage((line) => {
       let message;
       try { message = JSON.parse(line); }
       catch { handler(line); return; }
-      if (message.type === 'response' && message.result?.sessionId) {
-        // SDK 0.9.1's availableModels schema strips disabled fields and requires
-        // optional display metadata. Preserve the raw live catalog and validate
-        // it ourselves; let DroidClient validate the rest of initialization.
+      if (initializeId !== undefined && message.type === 'response' && message.id === initializeId && !message.error && message.result?.sessionId) {
+        // SDK 0.9.1 strips disabled/deprecated and requires display metadata.
+        // Preserve ONLY the correlated initialization catalog. deprecated and
+        // supportsPDFs were observed on authenticated CLI 0.236.0, not guessed.
+        initializeId = undefined;
         const { availableModels, available_models, ...result } = message.result;
         catalog = availableModels ?? available_models;
         handler(JSON.stringify({ ...message, result }));
@@ -58,13 +67,14 @@ export class ModelCatalog {
     try {
       await transport.connect();
       await client.initializeSession({ machineId: 'default', cwd: this.config.stateDirectory, autonomyLevel: 'off', interactionMode: 'spec', disableBuiltinSkills: true });
-      const models = catalogSchema.parse(catalog).filter((model) => model.disabled !== true).map((model) => ({
+      const models = catalogSchema.parse(catalog).filter((model) => model.disabled !== true && model.deprecated !== true).map((model) => ({
         id: model.id, displayName: model.displayName,
+        ...(model.deprecated !== undefined ? { deprecated: model.deprecated } : {}),
         ...((model.provider ?? model.modelProvider) !== undefined ? { provider: model.provider ?? model.modelProvider } : {}),
         ...(model.supportedReasoningEfforts !== undefined ? { supportedReasoningEfforts: model.supportedReasoningEfforts } : {}),
         ...(model.defaultReasoningEffort !== undefined ? { defaultReasoningEffort: model.defaultReasoningEffort } : {}),
         ...(model.supportsImages !== undefined ? { supportsImages: model.supportsImages } : model.noImageSupport !== undefined ? { supportsImages: !model.noImageSupport } : {}),
-        ...(model.supportsPdfs !== undefined ? { supportsPdfs: model.supportsPdfs } : {}),
+        ...((model.supportsPdfs ?? model.supportsPDFs) !== undefined ? { supportsPdfs: model.supportsPdfs ?? model.supportsPDFs } : {}),
       })).sort((a, b) => compare(a.displayName, b.displayName) || compare(a.id, b.id));
       return { fetchedAt: new Date().toISOString(), models };
     } finally {

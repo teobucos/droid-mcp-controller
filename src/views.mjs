@@ -35,7 +35,7 @@ function needsAttention(run, note) {
   if (WORKING.has(run.state)) return false;
   return ['failed', 'timed_out', 'unknown'].includes(run.state)
     || (run.state === 'interrupted' && !run.cancelRequested)
-    || (run.state === 'cancelled' && run.errorCode === 'queue_lost')
+    || (run.state === 'cancelled' && ['queue_lost', 'predecessor_failed'].includes(run.errorCode))
     || (run.questions?.length ?? 0) > 0 || (run.permissionsDeclined ?? 0) > 0;
 }
 
@@ -43,6 +43,12 @@ export const isWorking = (runs) => runs.some((run) => WORKING.has(run.state));
 
 export function sessionStatus(session, runs) {
   const head = runs.find((run) => run.runId === session.headRunId);
+  // Older v3 records lack the link; infer only for a predecessor_failed head,
+  // never permanently flag historical failures after a resolving turn.
+  const predecessor = head.errorCode === 'predecessor_failed'
+    ? runs.find((run) => run.runId === head.predecessorRunId)
+      ?? runs.slice(0, runs.indexOf(head)).findLast((run) => ['failed', 'timed_out'].includes(run.state) && !run.result)
+    : null;
   const note = notification(head);
   const state = isWorking(runs) ? 'working' : runs.some((run) => run.state === 'unknown') ? 'unknown' : 'idle';
   const preview = head.preview ?? '';
@@ -56,6 +62,7 @@ export function sessionStatus(session, runs) {
     latestRun: {
       runId: head.runId, state: head.state, terminal: !WORKING.has(head.state), needsAttention: needsAttention(head, note),
       autonomy: head.autonomy, model: head.model ?? null, reasoningEffort: head.reasoningEffort ?? null,
+      predecessorFailure: predecessor ? { runId: predecessor.runId, state: predecessor.state, error: runError(predecessor) } : null,
       error: runError(head), questions: head.questions ?? [], permissionsDeclined: head.permissionsDeclined ?? 0,
     },
     notification: note,

@@ -23,9 +23,17 @@ State lives in `stateDirectory`: `state.json`, `<runId>.result.json`, `owner.jso
 4. `replyTo` of each session is the recorded `puckConversationId` of its head run (or `null`).
    Nothing is retargeted: sessions that carry the archived host-default recipient keep it
    until you retarget or detach them with `droid_send_message({replyTo})`.
-5. Run ids, request keys, fingerprints, results and `unknown` outcomes are untouched. A
-   replay of an old key through the new code with identical arguments conflicts instead of
-   re-running (the fingerprint schema changed); that is the fail-closed direction.
+5. Run ids, request keys, fingerprints, results and `unknown` outcomes are untouched.
+   Migrated fingerprints are marked version 2. Identical retries through `droid_start`
+   or `droid_continue` compare the original v1/v2 serialization and return the existing
+   outcome without re-running, even when the old run is no longer head. Already-migrated
+   records retain `parentRunId`, which also identifies that comparison contract.
+   Changed intent conflicts. New session tools do not interpret an old fingerprint as
+   acceptance of new title, labels or steering semantics: use the original legacy alias
+   to retry an old request, never a new request key to bypass uncertain acceptance.
+   The removed host-default recipient is not restored: if an old `droid_start`
+   implicitly used one, retry with that recorded `puckConversationId` explicitly.
+   Omitting it now means detached and therefore conflicts with that routed intent.
 
 Every start also recovers: runs that were `starting/running/cancelling` become `unknown`
 (or take their stored terminal result); runs that were `queued` become `cancelled` with
@@ -38,7 +46,12 @@ is replayed.
   reached Droid. A migrated run counts as submitted (usage turns, `historyAvailable:false` when its
   transcript is missing) if it had a Droid session UUID or a stored result. A legacy run that failed in
   Amp MCP preflight after the session was created is therefore counted as a turn in `droid_get_usage`
-  and shows a "no transcript" notice. New runs record `submittedAt` exactly.
+  and shows a "no transcript" notice. Older v3 `submittedAt` fields are also intent
+  markers, not exact acceptance timestamps. New runs record `submissionIntentAt`
+  before sending to Factory. The worker waits for correlated acknowledgments after
+  file and directory fsync of both the session UUID and submission intent. A crash
+  after acknowledgment can still leave an unaccepted or partially executed turn;
+  this is not exactly-once execution. Usage counts potentially submitted turns.
 - **Development builds of v3.** State written by pre-release v3 builds (before the `submittedAt`
   field) is not a supported input; only v1/v2 production state is migrated.
 
@@ -60,4 +73,6 @@ further turns on it (`session_unknown_outcome`). Start a new session with a new
 Progress is bounded: last 20 events, 4000 chars per event field, 16000-char text/stderr
 tails, 10 declined questions. Result files omit SDK user-message copies. Completed records are
 not deleted automatically; archive with the controller stopped, preserving keys if you need
-deduplication.
+deduplication. The byte-identical v1 backup retains its original raw prompts; protect
+it as private recovery data. The migrated state and new result files omit original
+user-message copies; assistant echoes and tool output are separate retention concerns.

@@ -26,7 +26,7 @@ Create a Droid session in an approved local workspace and start its first turn. 
 
 ### `droid_send_message`
 
-Send a follow-up to a Droid session, or steer it. Returns immediately with runId, disposition (started | queued | interrupting) and the session status. An idle session starts the message at once. A busy session queues it after the current turn by default (interrupt:false), so unlike Puck's Amp thread messages this does not interrupt by default; mid-run steering needs interrupt:true. interrupt:true is a controller-managed serial interrupt-and-resume: the active turn is interrupted, its process cleaned up, then your message runs in the same Droid session. It is not native in-flight injection, and interrupted tool side effects are not undone. Choose model explicitly for every turn. Example: {session:'SESSION_ID', requestKey:'review-42-next', message:'Focus on authorization errors.', model:'MODEL_ID'}; steering: add interrupt:true. replyTo is optional: omit it to keep the session recipient, pass a Puck conversation id to retarget, or null to detach. A normal message restores an archived session. Duplicate requestKeys return the original acceptance; changed intent, an unknown outcome (controller crashed mid-turn), too many queued turns and invalid settings reject with an actionable code. Queued messages live in memory and are not replayed after a controller restart.
+Send a follow-up to a Droid session, or steer it. Returns immediately with runId, disposition (started | queued | interrupting) and the session status. An idle session starts the message at once. A busy session queues it after the current turn by default (interrupt:false), so unlike Puck's Amp thread messages this does not interrupt by default; mid-run steering needs interrupt:true. interrupt:true durably supersedes older queued turns on this session (cancelled with code superseded), interrupts the active turn, waits for process cleanup and workspace admission, then runs your message in the same Droid session. It is not native in-flight injection, and interrupted tool side effects are not undone. Choose model explicitly for every turn. Example: {session:'SESSION_ID', requestKey:'review-42-next', message:'Focus on authorization errors.', model:'MODEL_ID'}; steering: add interrupt:true. replyTo is optional: omit it to keep the session recipient, pass a Puck conversation id to retarget, or null to detach. A normal message restores an archived session. Duplicate requestKeys return the original acceptance; changed intent, an unknown outcome (controller crashed mid-turn), too many queued turns and invalid settings reject with an actionable code. Queued messages live in memory and are not replayed after a controller restart.
 
 **Input**
 
@@ -34,7 +34,7 @@ Send a follow-up to a Droid session, or steer it. Returns immediately with runId
 - `requestKey` (required): string; Idempotency key. Reuse it only with exactly the same arguments; it is global to this controller.
 - `message` (required): string
 - `model` (required): string; A model id from droid_models, chosen explicitly for this turn.
-- `interrupt`: boolean; default false; false (default) queues after the current turn; true interrupts the active turn first.
+- `interrupt`: boolean; default false; false (default) queues after the current turn; true supersedes older queued turns and interrupts the active turn first.
 - `replyTo`: string | null
 - `reasoningEffort`: string; one of `off`, `none`, `dynamic`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; Independent of autonomy. Must be supported by the chosen model; defaults to the host setting.
 - `autonomy`: string; one of `off`, `low`, `medium`, `high`; off = read-only Spec mode; low|medium|high = Auto at that level. Defaults to the host default and is capped by the host ceiling.
@@ -117,7 +117,7 @@ Cancel a Droid session: interrupt its running turn and drop its queued follow-up
 
 ### `droid_get_usage`
 
-Get token usage for one Droid session, or for every controller turn when session is omitted. Returns turns, turnsWithUsage, summed token counts and factoryCredits (null when Factory reported none). Example: {session:'SESSION_ID'} or {after:'2026-10-01T00:00:00Z', before:'2026-11-01T00:00:00Z'}. Dates filter turn creation time, after inclusive and before exclusive. Each turn that was submitted counts once (turns cancelled while still queued never ran and are not counted); retries with the same requestKey are not double counted. Missing usage is never counted as zero credits or guessed in dollars. Makes no model or billing call. Unknown sessions and invalid ranges reject.
+Get token usage for one Droid session, or for every controller turn when session is omitted. Returns turns, turnsWithUsage, summed token counts and factoryCredits (null when Factory reported none). Example: {session:'SESSION_ID'} or {after:'2026-10-01T00:00:00Z', before:'2026-11-01T00:00:00Z'}. Dates filter turn creation time, after inclusive and before exclusive. Each potentially submitted turn counts once (durable submission intent or unknown outcome is not proof of Factory acceptance; queued cancellations are not counted); retries with the same requestKey are not double counted. Missing usage is never counted as zero credits or guessed in dollars. Makes no model or billing call. Unknown sessions and invalid ranges reject.
 
 **Input**
 
@@ -139,7 +139,7 @@ _none_
 
 ### `droid_models`
 
-List the models currently available to this controller's authenticated Factory account and organization. Use a returned id explicitly for every created or continued turn; never guess ids from CLI help or old sessions. Example: {}. Returns fetchedAt and enabled models, with reasoning and media capabilities only when Factory supplies them. Concurrent calls share one bounded cache refresh and no task prompt is submitted. A failed refresh returns model_discovery_failed, never an expired catalog presented as current. Pricing is never fabricated.
+List the models currently available to this controller's authenticated Factory account and organization. Use a returned id explicitly for every created or continued turn; never guess ids from CLI help or old sessions. Example: {}. Returns fetchedAt and models excluding disabled:true and deprecated:true, with reasoning, lifecycle and media metadata only when Factory supplies them. Missing deprecated metadata means lifecycle is unknown, not proven non-legacy. Concurrent calls share one bounded cache refresh and no task prompt is submitted. A failed refresh returns model_discovery_failed, never an expired catalog presented as current. Pricing is never fabricated.
 
 **Input**
 

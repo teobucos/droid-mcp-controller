@@ -33,6 +33,7 @@ export const statusShape = z.object({
   latestRun: z.object({
     runId: z.string(), state: z.enum(RUN_STATES), terminal: z.boolean(), needsAttention: z.boolean(),
     autonomy: z.string(), model: z.string().nullable(), reasoningEffort: z.string().nullable(),
+    predecessorFailure: z.object({ runId: z.string(), state: z.enum(RUN_STATES), error: errorShape.nullable() }).nullable().describe('Failed predecessor that caused this queued turn to be dropped; null for other turns.'),
     error: errorShape.nullable(), permissionsDeclined: z.number().describe('Tool permissions the controller declined this turn (anything above the autonomy policy). The SDK may still report success after a declined tool, so check this before trusting the output'), questions: z.array(z.object({ question: z.string(), options: z.array(z.string()) })).describe('AskUser questions the agent asked and the controller declined; answer them with droid_send_message'),
   }),
   notification: z.object({ state: z.enum(['disabled', 'pending', 'accepted', 'failed', 'not_sent']).describe('Observed agent-side report to replyTo: disabled = detached; pending = turn still running; accepted = the Amp MCP accepted a report (not proof Puck read it); failed = a report was rejected or misrouted; not_sent = the turn ended without a report'), error: errorShape.nullable() }),
@@ -69,11 +70,11 @@ export function defineTools(controller, models, config) {
     tool('droid_send_message',
       'Send a follow-up to a Droid session, or steer it. Returns immediately with runId, disposition (started | queued | interrupting) and the session status. ' +
       'An idle session starts the message at once. A busy session queues it after the current turn by default (interrupt:false), so unlike Puck\'s Amp thread messages this does not interrupt by default; mid-run steering needs interrupt:true. ' +
-      'interrupt:true is a controller-managed serial interrupt-and-resume: the active turn is interrupted, its process cleaned up, then your message runs in the same Droid session. It is not native in-flight injection, and interrupted tool side effects are not undone. ' +
+      'interrupt:true durably supersedes older queued turns on this session (cancelled with code superseded), interrupts the active turn, waits for process cleanup and workspace admission, then runs your message in the same Droid session. It is not native in-flight injection, and interrupted tool side effects are not undone. ' +
       "Choose model explicitly for every turn. Example: {session:'SESSION_ID', requestKey:'review-42-next', message:'Focus on authorization errors.', model:'MODEL_ID'}; steering: add interrupt:true. " +
       'replyTo is optional: omit it to keep the session recipient, pass a Puck conversation id to retarget, or null to detach. A normal message restores an archived session. ' +
       'Duplicate requestKeys return the original acceptance; changed intent, an unknown outcome (controller crashed mid-turn), too many queued turns and invalid settings reject with an actionable code. Queued messages live in memory and are not replayed after a controller restart.',
-      z.object({ session, requestKey, message: text, model, interrupt: z.boolean().default(false).describe('false (default) queues after the current turn; true interrupts the active turn first.'), replyTo: replyTo.nullable().optional(), ...settings }).strict(),
+      z.object({ session, requestKey, message: text, model, interrupt: z.boolean().default(false).describe('false (default) queues after the current turn; true supersedes older queued turns and interrupts the active turn first.'), replyTo: replyTo.nullable().optional(), ...settings }).strict(),
       z.object({ runId: z.string(), disposition: dispositionShape, status: statusShape }),
       ({ message, ...args }) => controller.send({ ...args, prompt: message })),
 
@@ -121,7 +122,7 @@ export function defineTools(controller, models, config) {
 
     tool('droid_get_usage',
       'Get token usage for one Droid session, or for every controller turn when session is omitted. Returns turns, turnsWithUsage, summed token counts and factoryCredits (null when Factory reported none). ' +
-      "Example: {session:'SESSION_ID'} or {after:'2026-10-01T00:00:00Z', before:'2026-11-01T00:00:00Z'}. Dates filter turn creation time, after inclusive and before exclusive. Each turn that was submitted counts once (turns cancelled while still queued never ran and are not counted); retries with the same requestKey are not double counted. " +
+      "Example: {session:'SESSION_ID'} or {after:'2026-10-01T00:00:00Z', before:'2026-11-01T00:00:00Z'}. Dates filter turn creation time, after inclusive and before exclusive. Each potentially submitted turn counts once (durable submission intent or unknown outcome is not proof of Factory acceptance; queued cancellations are not counted); retries with the same requestKey are not double counted. " +
       'Missing usage is never counted as zero credits or guessed in dollars. Makes no model or billing call. Unknown sessions and invalid ranges reject.',
       z.object({ session: uuid.optional(), after: iso.optional(), before: iso.optional() }).strict(),
       z.object({ session: z.string().nullable(), turns: z.number(), turnsWithUsage: z.number(), tokens, factoryCredits: z.number().nullable() }),
@@ -137,10 +138,10 @@ export function defineTools(controller, models, config) {
 
     tool('droid_models',
       'List the models currently available to this controller\'s authenticated Factory account and organization. Use a returned id explicitly for every created or continued turn; never guess ids from CLI help or old sessions. ' +
-      'Example: {}. Returns fetchedAt and enabled models, with reasoning and media capabilities only when Factory supplies them. Concurrent calls share one bounded cache refresh and no task prompt is submitted. ' +
+      'Example: {}. Returns fetchedAt and models excluding disabled:true and deprecated:true, with reasoning, lifecycle and media metadata only when Factory supplies them. Missing deprecated metadata means lifecycle is unknown, not proven non-legacy. Concurrent calls share one bounded cache refresh and no task prompt is submitted. ' +
       'A failed refresh returns model_discovery_failed, never an expired catalog presented as current. Pricing is never fabricated.',
       z.object({}).strict(),
-      z.object({ fetchedAt: z.string(), models: z.array(z.object({ id: z.string(), displayName: z.string(), provider: z.string().optional(), supportedReasoningEfforts: z.array(z.string()).optional(), defaultReasoningEffort: z.string().optional(), supportsImages: z.boolean().optional(), supportsPdfs: z.boolean().optional() })) }),
+      z.object({ fetchedAt: z.string(), models: z.array(z.object({ id: z.string(), displayName: z.string(), deprecated: z.boolean().optional(), provider: z.string().optional(), supportedReasoningEfforts: z.array(z.string()).optional(), defaultReasoningEffort: z.string().optional(), supportsImages: z.boolean().optional(), supportsPdfs: z.boolean().optional() })) }),
       () => models.get(), true),
 
     // ---- deprecated aliases: same controller methods, old names and shapes ----
