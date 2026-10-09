@@ -7,8 +7,8 @@ Amp MCP. No UI, database service, Factory daemon or account API. Installation an
 secure connection steps are in [HANDOFF.md](HANDOFF.md); the full, generated tool
 schemas are in [docs/TOOLS.md](docs/TOOLS.md).
 
-Requires Node.js 22+, Linux or macOS, and an authenticated Droid CLI (target
-**0.233.0**, normally `~/.local/bin/droid`). The controller inherits the service
+Requires Node.js 22+, Linux or macOS, and an authenticated Droid CLI (verified with
+**0.236.0**, normally `~/.local/bin/droid`). The controller inherits the service
 user's login environment and never collects credentials. Dependencies are locked;
 `uuid` is overridden to 11.1.1 to fix GHSA-w5hq-g745-h8pq.
 
@@ -74,8 +74,10 @@ never submitted and are never replayed.
 
 ### Steering is serial interrupt-and-resume
 
-`interrupt:true` interrupts the active turn through the protocol, waits for its
-terminal result and process cleanup, then resumes the same Droid session with your
+`interrupt:true` durably cancels older queued turns on that session with `superseded`,
+retaining their request keys and history. It then interrupts the active turn through
+the protocol, waits for terminal result or termination and process cleanup, then
+passes workspace/capacity admission before resuming the same Droid session with your
 message. The SDK's high-level session rejects concurrent streams, so native in-flight
 injection is **not** claimed or implemented. Tool side effects of the interrupted turn
 are not undone. Cancelling or steering one session never touches another.
@@ -91,7 +93,7 @@ are not undone. Cancelling or steering one session never touches another.
 | `failed`, `timed_out`, `cancelled` | Setup/agent failure; deadline; cancelled without a terminal result (including dropped queued turns). |
 | `unknown` | Controller stopped mid-turn. Never replayed, never inferred as success; the session cannot continue. |
 
-A turn whose worker dies without a result is `failed`, and turns queued behind it on that session are dropped unsubmitted (`predecessor_failed`) so Puck decides what to do; the queue never resumes work across a failure.
+A turn whose worker dies without a result is `failed`, and turns queued behind it on that session are dropped unsubmitted (`predecessor_failed`) so Puck decides what to do; the queue never resumes work across a failure. That cancelled head still needs attention and exposes `latestRun.predecessorFailure` with the failed run handle, state and error. A successful resolving follow-up clears attention; historical failures are not permanent flags.
 
 `agentState` is `working` (anything queued or live), `idle` (nothing pending; **not** a
 success claim) or `unknown`. `droid_wait_for_sessions` treats every non-working
@@ -126,8 +128,13 @@ carry no logic of their own.
 user, HOME and `FACTORY_HOME_OVERRIDE` as normal runs, captures the live
 `availableModels`/`available_models`, closes the session, and never submits a prompt
 or approves a tool. Create and send validate `model` and `reasoningEffort` against
-that catalog and reject with `model_unavailable` / `reasoning_unsupported`. Disabled
-entries are omitted; optional metadata is returned only when Factory supplies it.
+that catalog and reject with `model_unavailable` / `reasoning_unsupported`. Entries
+with `disabled:true` or `deprecated:true` are omitted; optional metadata is returned
+only when Factory supplies it. CLI 0.236.0 supplies `deprecated` in initialization;
+the pinned SDK strips it, so raw capture is correlated to that initialization's request
+ID before SDK parsing. Missing lifecycle metadata is **unknown**, not proof a model
+is non-legacy. Consult Factory's [current catalog](https://docs.factory.com/docs/models)
+and the installed `droid exec --help` deprecation labels when metadata is absent.
 `modelCacheTtlMs` defaults to 60000 (5000 to 600000); concurrent callers share one
 refresh; a failed refresh returns `model_discovery_failed`, never an expired catalog.
 
@@ -175,7 +182,13 @@ Every routed turn receives the explicit recipient, the controller session and ru
 handles, and how to call `{action:"send",params:{conversationID,message}}` and
 `{action:"read_reply",params:{replyHandle}}`. Routed sessions may approve, as a
 single use, only that tool: `send` to their own `replyTo`, or `read_reply`
-(so read-only reviewers can report). Everything else still needs autonomy `high`.
+with a nonempty recognized handle from a successful own-recipient send in **this run**
+(so read-only reviewers can report). Missing, foreign, failed-send and old-run handles
+are not pre-approved. Handles are memory-only and reset on continuation, retarget and
+restart. The parser accepts a top-level JSON `replyHandle` in string/text-block results;
+unknown result formats fail closed. These are local pre-approval rules: autonomy `high`
+still approves any offered single-use permission, including other Puck calls. Neither
+policy is OAuth credential scoping or OS isolation.
 
 Progress is sent once, fire-and-forget; continue authorized independent work. A
 question, blocker or costly/irreversible step needing steering uses one CHECKPOINT
@@ -275,7 +288,7 @@ Optional settings:
 | --- | --- |
 | `transport` | `stdio` (no network listener) |
 | `maxAutonomy` | `high` (owner-authorized service-user access) |
-| `defaultAutonomy` | `high`; cannot exceed `maxAutonomy` |
+| `defaultAutonomy` | Inherits `maxAutonomy` (`high` when both omitted); an explicit default cannot exceed the ceiling |
 | `reasoningEffort` | Unset; otherwise `off`, `none`, `dynamic`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, supported by the selected Factory model |
 | `maxConcurrentRuns` | 4 (1 to 16); queued turns wait FIFO |
 | `runTimeoutMs` | 3600000 (one hour wall clock, including setup) |
@@ -360,13 +373,29 @@ capacity queueing, overlapping-workspace serialization (both lock directions,
 symlinks, FIFO fairness), mixed autonomy, concurrent reply-back with per-session
 recipients, misroute detection, cancel/steer isolation, Amp MCP preflight failures,
 v1/v2 migration with backup, crash fail-closed and queue loss. See `test/README.md`.
+`test/review-regressions.test.mjs` and `test/worker-ack.test.mjs` additionally test
+durable queue supersession, persistence ACK fault boundaries, per-run reply handles,
+failed-predecessor attention, catalog lifecycle and migrated request-key retries.
 `npm run smoke` runs a two-turn lifecycle against a real CLI, and
 `scripts/acceptance.mjs` is the live acceptance driver for a **second** instance
 (own port, token and state directory), never the production service.
 
+For bounded authenticated read-only verification with disposable private state:
+`node scripts/verify-live.mjs --droid /absolute/path/to/droid --model CURRENT_ID`.
+It checks real SDK acceptance, two exact results, same-UUID continuation and
+cancellation of a third turn, then process cleanup; output contains only assertions
+and versions, not prompts, session UUIDs or credentials. Pick an economical current
+model with `low` reasoning from the live catalog first. Existing CLI login is required.
+`node scripts/verify-route.mjs --droid /absolute/path/to/droid` separately checks
+fresh, resumed, reattached and detached MCP inventories without any model prompt
+or Puck message. It requires existing OAuth for the generic Amp endpoint. On CLI
+0.236.0 / SDK 0.9.1, omitting attachments on resume does not retain a previous Amp
+attachment. This does not prove future CLI behavior or constrain inherited host MCP.
+
 Sources: [Factory SDK documentation](https://docs.factory.com/sdk/typescript.md),
 [Droid exec](https://docs.factory.com/docs/droid-exec/overview),
 [published SDK](https://github.com/Factory-AI/droid-sdk-typescript),
+[Node IPC send callback semantics](https://nodejs.org/download/release/v22.16.0/docs/api/child_process.html#subprocesssendmessage-sendhandle-options-callback),
 [reference bridge](https://github.com/mrwogu/factory-droid-openai).
 The reference bridge was cloned/read, not changed or incorporated: its
 OpenAI-transcript/tool isolation contract differs from this session controller.

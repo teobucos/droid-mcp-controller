@@ -17,7 +17,7 @@ const schema = z.object({
   tokenFile: absolute.optional(),
   publicUrl: z.string().url().optional(),
   maxAutonomy: autonomy.default('high'),
-  defaultAutonomy: autonomy.default('high'),
+  defaultAutonomy: autonomy.optional(),
   reasoningEffort: reasoning.optional(),
   maxConcurrentRuns: z.number().int().min(1).max(16).default(4),
   runTimeoutMs: z.number().int().min(1000).max(86400000).default(3600000),
@@ -32,7 +32,8 @@ const schema = z.object({
         && url.searchParams.get('profile') === 'external-agent' && [...url.searchParams.keys()].every((key) => key === 'profile');
     }, `ampMcp.url must be exactly ${AMP_MCP_URL}: credential-free and not bound to any thread (no threadID)`),
   }).strict().optional(),
-}).strict().refine((config) => autonomy.options.indexOf(config.defaultAutonomy) <= autonomy.options.indexOf(config.maxAutonomy), 'defaultAutonomy cannot exceed maxAutonomy');
+}).strict().transform((config) => ({ ...config, defaultAutonomy: config.defaultAutonomy ?? config.maxAutonomy }))
+  .refine((config) => autonomy.options.indexOf(config.defaultAutonomy) <= autonomy.options.indexOf(config.maxAutonomy), 'defaultAutonomy cannot exceed maxAutonomy');
 
 export function loadConfig(path) {
   if (!['linux', 'darwin'].includes(process.platform)) throw new Error('Linux or macOS required for process-group cleanup');

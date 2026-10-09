@@ -1,4 +1,5 @@
 import { createSession, resumeSession, ProcessTransport, ToolConfirmationOutcome } from '@factory/droid-sdk/node';
+import { randomUUID } from 'node:crypto';
 import { approvedWorkspace } from './config.mjs';
 
 const PUCK_TOOL = 'amp-puck___puck';
@@ -11,12 +12,29 @@ const PUCK_TOOL = 'amp-puck___puck';
 const DENIED_TOOLS = ['amp-puck___manage_amp', 'amp-puck___find_thread', 'amp-puck___read_thread'];
 let session;
 let cancelled = false;
+let started = false;
+let pendingPersistence;
 const abort = new AbortController();
 const send = (msg) => new Promise((resolve, reject) => {
   if (!process.connected) return reject(new Error('Controller disconnected'));
   process.send(msg, (error) => error ? reject(error) : resolve());
 });
 const event = (data) => send({ kind: 'event', event: data });
+// process.send's callback acknowledges transport, not the parent's durable write.
+// There is one pending phase, identified by the run, both sessions and a nonce.
+async function persist(run, phase, timeoutMs) {
+  if (cancelled) throw new Error('Cancelled before persistence');
+  const request = { kind: 'persist', phase, runId: run.runId, sessionId: run.sessionId, droidSessionId: session.id, nonce: randomUUID() };
+  let timer;
+  try {
+    await new Promise((resolve, reject) => {
+      pendingPersistence = { request, resolve, reject };
+      timer = setTimeout(() => reject(new Error('Controller persistence acknowledgment timed out')), timeoutMs);
+      void send(request).catch(reject);
+    });
+  } finally { clearTimeout(timer); pendingPersistence = null; }
+  if (cancelled) throw new Error('Cancelled before turn submission');
+}
 // Abrupt controller death must not leave a Droid process running independently.
 process.on('disconnect', () => {
   try { process.kill(-process.pid, 'SIGKILL'); } catch { process.exit(1); }
@@ -81,26 +99,50 @@ async function preflightAmpMcp() {
   if (!cancelled) throw new SetupError('amp_mcp_unreachable', 'The Amp MCP did not finish connecting in time');
 }
 
-// Only the puck tool, only report-to-recipient or read_reply: nothing broader than the explicit route.
-function isOwnPuckCall(params, replyTo) {
+// Only this run's successful send results grant read_reply pre-approval. Handles
+// are deliberately not inherited across continuation, retargeting or restart.
+function isOwnPuckCall(params, replyTo, replyHandles) {
   const uses = params.toolUses ?? [];
   return uses.length > 0 && uses.every(({ toolUse, confirmationType }) => confirmationType === 'mcp_tool' && toolUse?.name === PUCK_TOOL
-    && (toolUse.input?.action === 'read_reply' || (toolUse.input?.action === 'send' && toolUse.input?.params?.conversationID === replyTo)));
+    && ((toolUse.input?.action === 'read_reply' && replyHandles.has(toolUse.input?.params?.replyHandle))
+      || (toolUse.input?.action === 'send' && toolUse.input?.params?.conversationID === replyTo)));
+}
+
+function rememberReplyHandle(content, replyTo, handles) {
+  // SDK 0.9.1 preserves string or MCP text-block results. Do not scan arbitrary
+  // prose/quoted replies for capabilities. Unknown result formats fail closed.
+  const texts = typeof content === 'string' ? [content] : Array.isArray(content) ? content.filter((block) => block.type === 'text').map((block) => block.text) : [];
+  for (const text of texts) {
+    let result;
+    try { result = JSON.parse(text); } catch { continue; }
+    const handle = result?.replyHandle;
+    // Pattern verified from the authenticated Amp puck input schema (2026-10-08).
+    if (typeof handle === 'string' && new RegExp(`^v1:${replyTo}:M-[0-9A-Za-z]{22}$`).test(handle)
+      && (result.conversationID === undefined || result.conversationID === replyTo)) handles.add(handle);
+  }
 }
 
 process.on('message', async (msg) => {
+  if (msg.kind === 'persisted') {
+    if (pendingPersistence && ['phase', 'runId', 'sessionId', 'droidSessionId', 'nonce'].every((key) => msg[key] === pendingPersistence.request[key])) pendingPersistence.resolve();
+    return;
+  }
   if (msg.cancel) {
     cancelled = true;
+    pendingPersistence?.reject(new Error('Cancelled while awaiting persistence'));
     if (session) await session.interrupt().catch(() => {});
     else abort.abort(new Error('Cancelled during session setup'));
     return;
   }
+  if (started || !msg.run) return;
+  started = true;
   const { run, prompt, config } = msg;
   const routed = Boolean(run.replyTo && config.amp);
   let terminal;
   let failure;
   let failureCode;
   const toolNames = new Map();
+  const replyHandles = new Set();
   const transport = new ProcessTransport({
     droidExecPath: config.droidPath, cwd: run.workspace,
     env: { FACTORY_DROID_AUTO_UPDATE_ENABLED: 'false' },
@@ -115,6 +157,8 @@ process.on('message', async (msg) => {
       }
     } else if (message.type === 'tool_result' && toolNames.has(message.toolUseId)) {
       const sentTo = toolNames.get(message.toolUseId);
+      toolNames.delete(message.toolUseId);
+      if (!message.isError && sentTo === run.replyTo) rememberReplyHandle(message.content, run.replyTo, replyHandles);
       void send(message.isError
         ? { kind: 'reply', state: 'failed', code: 'reply_failed', message: 'The Amp MCP rejected the agent\'s report' }
         : sentTo === run.replyTo ? { kind: 'reply', state: 'accepted' } : { kind: 'reply', state: 'failed', code: 'reply_misrouted', message: 'The agent sent a report to a conversation other than replyTo' }).catch(() => {});
@@ -143,7 +187,7 @@ process.on('message', async (msg) => {
       permissionHandler(params) {
         // Routed sessions may always report to their own recipient, even when read-only;
         // everything else still needs autonomy high, and only ever as a single use.
-        const proceed = (run.autonomy === 'high' || (routed && isOwnPuckCall(params, run.replyTo))) && params.options.some((option) => option.value === ToolConfirmationOutcome.ProceedOnce);
+        const proceed = (run.autonomy === 'high' || (routed && isOwnPuckCall(params, run.replyTo, replyHandles))) && params.options.some((option) => option.value === ToolConfirmationOutcome.ProceedOnce);
         void event({ type: proceed ? 'permission_approved_once' : 'permission_declined', details: JSON.stringify(params).slice(0, 4000) }).catch(() => {});
         return proceed ? ToolConfirmationOutcome.ProceedOnce : ToolConfirmationOutcome.Cancel;
       },
@@ -157,7 +201,16 @@ process.on('message', async (msg) => {
     };
     session = run.droidSessionId ? await resumeSession(run.droidSessionId, options) : await createSession({ ...options, cwd: run.workspace, ...settings });
     if (run.droidSessionId && session.id !== run.droidSessionId) throw new Error('Resumed session UUID mismatch');
-    await send({ kind: 'session', sessionId: session.id });
+    // Observe on receipt, before a following permission RPC can be dispatched.
+    // Reading the async stream alone races result -> read_reply in one batch.
+    if (routed) session.onNotification(({ params }) => {
+      if (params.sessionId !== session.id) return;
+      const notification = params.notification;
+      if (notification.type === 'create_message' && notification.message.role === 'assistant') {
+        for (const block of notification.message.content) if (block.type === 'tool_use') observe({ ...block, type: 'tool_call', toolUseId: block.id });
+      } else if (notification.type === 'tool_result') observe(notification);
+    });
+    await persist(run, 'session', config.ackTimeoutMs);
     if (approvedWorkspace(config, session.cwd ?? '') !== run.workspace) throw new Error('Resumed session cwd differs from approved workspace');
     if (cancelled) throw new Error('Cancelled before turn submission');
     // CLI flags do NOT configure stream-jsonrpc sessions; set on resume too.
@@ -185,11 +238,12 @@ Always call the puck tool directly even in Spec mode; never call ExitSpecMode me
 `;
     }
     if (cancelled) throw new Error('Cancelled before turn submission');
-    await send({ kind: 'submitted' });
+    // This is durable intent, NOT evidence of Factory acceptance or exactly-once
+    // execution. A crash after this ACK leaves a potentially submitted turn.
+    await persist(run, 'submission_intent', config.ackTimeoutMs);
     for await (const message of session.stream(submitted)) {
       if (message.type === 'result') terminal = message;
       else {
-        if (routed) observe(message);
         await event({ type: message.type, ...(message.text ? { text: message.text.slice(-4000) } : {}), ...(message.name ? { tool: message.name } : {}), ...(typeof message.message === 'string' ? { message: message.message.slice(-4000) } : {}) });
       }
     }

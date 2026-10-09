@@ -29,6 +29,7 @@ const ACTIONS = {
   run_failed: ['Read the session (droid_read_session) for details, then send a corrected message.', false],
   timed_out: ['The turn exceeded runTimeoutMs. Send a narrower message or ask the operator to raise the timeout.', false],
   cancelled: ['The turn was cancelled. Send a message to continue.', false],
+  superseded: ['An interrupting message superseded this queued turn; it was never submitted. Its requestKey remains reserved.', false],
   predecessor_failed: ['The previous turn on this session ended without a result, so queued follow-ups were dropped unsubmitted. Check the session, then send again.', false],
   queue_lost: ['The controller restarted before this queued turn started; it was never submitted. Send it again if still wanted.', false],
   unknown_outcome: ['The controller stopped mid-turn, so the result is unknown. Inspect the workspace and history locally; nothing was replayed.', false],

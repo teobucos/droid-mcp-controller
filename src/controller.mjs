@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { approvedWorkspace, pathsOverlap, contains } from './config.mjs';
 import { ToolError } from './errors.mjs';
-import { openStore, atomicJson, defaultTitle, resultState, LIVE, WORKING } from './store.mjs';
+import { openStore, atomicJson, defaultTitle, resultState, legacyFingerprint, LIVE, WORKING } from './store.mjs';
 import { sessionStatus, isWorking, resultMessages, noticeMessage, turnNotices, legacyRun } from './views.mjs';
 
 const levels = ['off', 'low', 'medium', 'high'];
@@ -22,8 +22,9 @@ const MAX_PENDING_PER_SESSION = 8;
 const now = () => new Date().toISOString();
 const sha = (value) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
 const sum = (items, key) => items.reduce((total, item) => total + (item[key] ?? 0), 0);
-// The task prompt reached Droid (or may have): not dropped while queued, not stopped by preflight.
-const submitted = (run) => Boolean(run.submittedAt || run.result || run.state === 'unknown');
+// Potentially submitted, not proof of Factory acceptance. submittedAt is the
+// older v3 intent marker (and an approximation on migrated v1/v2 records).
+const submitted = (run) => Boolean(run.submissionIntentAt || run.submittedAt || run.result || run.state === 'unknown');
 const conflicts = (a, b) => (a.autonomy !== 'off' || b.autonomy !== 'off') && pathsOverlap(a.workspace, b.workspace);
 
 function cursorOf(cursor) {
@@ -84,7 +85,7 @@ export class Controller {
 
   // Deprecated droid_start: same intake, no catalog check, run-shaped answer for the accepted key.
   legacyStart(args) {
-    return this.legacyStatus(this.accept({ kind: 'create', ...args }).runId);
+    return this.legacyStatus(this.accept({ kind: 'create', ...args, legacy: true }).runId);
   }
 
   async send(args, guard) {
@@ -122,13 +123,23 @@ export class Controller {
       replyTo, interrupt: Boolean(intent.interrupt), title: intent.title ?? null, labels, continuesRun: intent.guard?.headRunId ?? null,
     });
     if (dup) {
-      if (dup.fingerprint !== fingerprint) throw new ToolError('request_key_conflict', 'requestKey was already used with different arguments');
+      // Only legacy aliases may compare the published hashes. Unknown raw-v1
+      // hashes (version 0) and modern caller options never gain that fallback.
+      const legacy = (intent.legacy || intent.guard) && intent.title === undefined && !labels.length && !intent.interrupt
+        && ([1, 2].includes(dup.fingerprintVersion) || (dup.fingerprintVersion === undefined && Object.hasOwn(dup, 'parentRunId')));
+      const historical = { workspace, prompt: intent.prompt, autonomy, model: intent.model, parentRunId: intent.guard?.headRunId ?? null, reasoningEffort, puckConversationId: replyTo };
+      const later = legacy && dup.fingerprintVersion !== 1 && dup.fingerprint === legacyFingerprint(historical, 2);
+      // Prompt-free v2/old-v3 records cannot be classified at startup. A matching
+      // five-field candidate is safe only without ANY new per-turn reasoning or
+      // routing: 98e0e7 supported neither. Never ignore a modern caller option.
+      const original = legacy && intent.reasoningEffort === undefined && !replyTo && !dup.replyTo
+        && dup.fingerprint === legacyFingerprint(historical, 1);
+      if (dup.fingerprint !== fingerprint && !later && !original) throw new ToolError('request_key_conflict', 'requestKey was already used with different arguments');
       return dup;
     }
     if (levels.indexOf(autonomy) > levels.indexOf(this.config.maxAutonomy)) throw new ToolError('autonomy_exceeds_ceiling', `Requested autonomy exceeds configured maxAutonomy (${this.config.maxAutonomy})`);
     if (this.stopping) throw new ToolError('shutting_down', 'Controller is shutting down');
     if (replyTo && !this.config.ampMcp) throw new ToolError('reply_back_unavailable', 'Amp MCP is not configured on this host; use replyTo:null or configure ampMcp');
-    if (this.queue.length >= MAX_QUEUED) throw new ToolError('queue_full', 'The controller admission queue is full');
     let runs = [];
     if (target) {
       runs = this.runsOf(target.sessionId);
@@ -137,8 +148,10 @@ export class Controller {
         if (isWorking(runs)) throw new ToolError('session_busy', 'Session has an active turn; cancel/wait before continuing');
         if (target.headRunId !== intent.guard.headRunId) throw new ToolError('not_session_head', 'Run is not the current head of this Droid session', { headRunId: target.headRunId });
       }
-      if (runs.filter((run) => WORKING.has(run.state)).length >= MAX_PENDING_PER_SESSION) throw new ToolError('queue_full', 'Too many turns are already pending on this session');
+      if (!intent.interrupt && runs.filter((run) => WORKING.has(run.state)).length >= MAX_PENDING_PER_SESSION) throw new ToolError('queue_full', 'Too many turns are already pending on this session');
     }
+    const superseded = intent.interrupt ? runs.filter((run) => run.state === 'queued') : [];
+    if (this.queue.length - superseded.length >= MAX_QUEUED) throw new ToolError('queue_full', 'The controller admission queue is full');
     const stamp = now();
     const before = target ? { headRunId: target.headRunId, archived: target.archived, replyTo: target.replyTo, updatedAt: target.updatedAt } : null;
     const session = target ?? (() => {
@@ -158,10 +171,17 @@ export class Controller {
     session.headRunId = run.runId;
     if (target) { session.archived = false; session.replyTo = replyTo; }
     session.updatedAt = stamp;
+    // Accept the steering turn and supersede old queued intent in ONE durable
+    // write. Keep keys/history; no crash or replay may revive the stopped work.
+    for (const old of superseded) this.state.runs[old.runId] = {
+      ...old, state: 'cancelled', errorCode: 'superseded', supersededBy: run.runId,
+      error: 'Superseded by an interrupting message before submission.', finishedAt: stamp, updatedAt: stamp,
+    };
     try {
       this.store.save(); // Idempotency and intent are durable BEFORE any subprocess starts.
     } catch (error) {
       // Nothing durable was accepted, so nothing may stay accepted in memory either.
+      for (const old of superseded) this.state.runs[old.runId] = old;
       delete this.state.runs[run.runId];
       this.keys.delete(requestKey);
       this.bySession.get(session.sessionId).pop();
@@ -169,6 +189,7 @@ export class Controller {
       else { delete this.state.sessions[session.sessionId]; this.bySession.delete(session.sessionId); this.state.nextSeq--; }
       throw error;
     }
+    if (superseded.length) this.queue = this.queue.filter((item) => item.run.sessionId !== session.sessionId);
     this.queue.push({ run, prompt: intent.prompt });
     if (disposition === 'interrupting') for (const live of runs.filter((item) => LIVE.has(item.state))) this.stopWorker(live, 'cancel');
     this.pump();
@@ -213,12 +234,32 @@ export class Controller {
       execArgv: [],
       env: { ...process.env, FACTORY_DROID_AUTO_UPDATE_ENABLED: 'false' },
     });
-    const entry = { child, result: null, error: null, errorCode: null, reason: null };
+    const entry = { child, result: null, error: null, errorCode: null, reason: null, persisted: new Map() };
     this.workers.set(run.runId, entry);
     entry.timer = setTimeout(() => this.stopWorker(run, 'timeout'), this.config.runTimeoutMs);
     child.stderr.on('data', (data) => this.message(run, { kind: 'stderr', text: data.toString() }));
     child.on('message', (msg) => {
-      if (msg.kind === 'result') {
+      if (msg.kind === 'persist') {
+        const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+        const valid = msg.runId === run.runId && msg.sessionId === run.sessionId
+          && uuid.test(msg.nonce) && uuid.test(msg.droidSessionId)
+          && (!run.droidSessionId || msg.droidSessionId === run.droidSessionId)
+          && ['session', 'submission_intent'].includes(msg.phase)
+          && (msg.phase === 'session' || entry.persisted.has('session'))
+          && (!entry.persisted.has(msg.phase) || entry.persisted.get(msg.phase) === msg.nonce);
+        if (!valid) { entry.error = 'Invalid worker persistence request'; this.killGroup(child.pid); return; }
+        if (!entry.persisted.has(msg.phase)) {
+          run.droidSessionId = msg.droidSessionId;
+          session.droidSessionId = msg.droidSessionId;
+          if (msg.phase === 'submission_intent') run.submissionIntentAt = now();
+          if (run.state !== 'cancelling') run.state = 'running';
+          this.changed(run); // atomicJson fsyncs the file AND directory before ACK.
+          entry.persisted.set(msg.phase, msg.nonce);
+        }
+        if (!entry.reason && child.connected) child.send({ ...msg, kind: 'persisted' }, (error) => {
+          if (error) { entry.error = 'Persistence acknowledgment delivery failed'; this.killGroup(child.pid); }
+        });
+      } else if (msg.kind === 'result') {
         if (msg.result.sessionId !== run.droidSessionId) { entry.error = 'Terminal result sessionId mismatch'; return; }
         // SDK results also contain user-message copies of submitted prompts.
         // Preserve assistant/tool output and outcome, not original input copies.
@@ -259,25 +300,21 @@ export class Controller {
       // A turn that ended with no terminal result leaves its session in doubt: queued follow-ups were
       // written for a different situation, so Puck decides instead of the queue resuming them.
       if (!result && (run.state === 'failed' || run.state === 'timed_out')) {
-        for (const queued of this.runsOf(run.sessionId).filter((other) => other.state === 'queued')) this.cancelRun(queued, 'predecessor_failed', 'The previous turn ended without a result, so this queued turn was dropped without being submitted.');
+        for (const queued of this.runsOf(run.sessionId).filter((other) => other.state === 'queued')) {
+          queued.predecessorRunId = run.runId;
+          this.cancelRun(queued, 'predecessor_failed', 'The previous turn ended without a result, so this queued turn was dropped without being submitted.');
+        }
       }
       this.pump();
     });
     child.send({
       run: { runId: run.runId, sessionId: run.sessionId, workspace: run.workspace, autonomy: run.autonomy, model: run.model, reasoningEffort: run.reasoningEffort, droidSessionId: run.droidSessionId, replyTo: run.replyTo },
       prompt,
-      config: { droidPath: this.config.droidPath, approvedDirectories: this.config.approvedDirectories, reasoningEffort: this.config.reasoningEffort, amp: this.config.ampMcp ?? null },
+      config: { droidPath: this.config.droidPath, approvedDirectories: this.config.approvedDirectories, reasoningEffort: this.config.reasoningEffort, amp: this.config.ampMcp ?? null, ackTimeoutMs: Math.min(this.config.runTimeoutMs, 30000) },
     });
   }
 
   message(run, msg) {
-    if (msg.kind === 'session') {
-      run.droidSessionId = msg.sessionId;
-      this.state.sessions[run.sessionId].droidSessionId = msg.sessionId;
-      if (run.state !== 'cancelling') run.state = 'running';
-      return this.changed(run); // The Droid UUID must be durable before the turn is submitted.
-    }
-    if (msg.kind === 'submitted') { run.submittedAt = now(); return this.changed(run); }
     if (msg.kind === 'stderr') run.stderrTail = (run.stderrTail + msg.text).slice(-16000);
     else if (msg.kind === 'event') {
       if (msg.event.type === 'permission_declined') run.permissionsDeclined = (run.permissionsDeclined ?? 0) + 1;

@@ -683,6 +683,9 @@ test('aliases: the seven legacy tools are thin views over the session core', asy
     const raw = await h.client.callTool({ name: 'droid_continue', arguments: { runId: run.runId, requestKey: 'alias-3b', prompt: 'x' } });
     assert.equal(raw.isError, true);
     assert.equal(typeof JSON.parse(raw.content[0].text).error, 'string');
+    // A setup cancellation may happen before any Droid UUID exists. This case
+    // specifically verifies resuming an initialized session, not that race.
+    await h.waitFor(() => readState(h).runs[run.runId].droidSessionId, 'durable session UUID');
     await call(h, 'droid_cancel', { runId: run.runId });
     await h.settle([readState(h).runs[run.runId].sessionId]);
     const next = await call(h, 'droid_continue', { runId: run.runId, requestKey: 'alias-3c', prompt: 'follow' });
@@ -808,7 +811,8 @@ test('adversarial fixes: unexpected worker death, default-deny aliases, admissio
       const status = (await h.settle([sid])).sessions[0];
       assert.equal(status.latestRun.state, 'cancelled');
       assert.equal(status.latestRun.error.code, 'predecessor_failed');
-      assert.equal(status.latestRun.needsAttention, false);
+      assert.equal(status.latestRun.needsAttention, true);
+      assert.equal(status.latestRun.predecessorFailure.runId, s.latestRun.runId);
       const runs = Object.values(readState(h).runs).filter((r) => r.sessionId === sid);
       assert.deepEqual(runs.map((r) => r.state), ['failed', 'cancelled']);
       assert.equal(h.turns('follow-after-kill').length, 0, 'the queued turn was never submitted');

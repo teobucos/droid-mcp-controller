@@ -49,6 +49,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
           send({ ...envelope('response'), id: req.id, error: { code: -32000, message: catalog.error } }); return;
         }
         persist(); reply(req, { sessionId: id, settings, session: { messages: [] }, ...(catalog.mode === 'missing' ? {} : { [process.env.MOCK_CATALOG_SNAKE === '1' ? 'available_models' : 'availableModels']: catalog }) });
+        if (process.env.MOCK_CATALOG_UNRELATED === '1') reply({ id: 'unrelated-response' }, { sessionId: randomUUID(), availableModels: [{ id: 'poison', displayName: 'Unrelated' }] });
         break;
       }
       persist(); reply(req, { sessionId: id, settings, session: { messages: [] }, availableModels: [] }); break;
@@ -98,6 +99,24 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (prompt === 'malformed') { process.stdout.write('{invalid json\n'); return; }
       if (prompt === 'silent') return;
       if (prompt === 'wrong-turn') { terminal('completed', randomUUID()); return; }
+      if (prompt.startsWith('puck-handle:')) {
+        const mode = prompt.slice('puck-handle:'.length);
+        const recipient = text0.match(/conversationID: (T-[0-9a-f-]{36})/)?.[1];
+        const handle = `v1:${recipient}:M-0123456789abcdefghijkl`;
+        if (!['missing', 'stale'].includes(mode)) {
+          const sentTo = mode === 'misrouted' ? 'T-99999999-9999-4999-8999-999999999999' : recipient;
+          const toolUseId = randomUUID();
+          notify({ type: 'create_message', message: { id: randomUUID(), role: 'assistant', content: [{ type: 'tool_use', id: toolUseId, name: 'amp-puck___puck', input: { action: 'send', params: { conversationID: sentTo, message: 'fixture checkpoint' } } }], createdAt: now, updatedAt: now } });
+          const body = JSON.stringify({ status: 'queued', conversationID: sentTo, replyHandle: handle });
+          notify({ type: 'tool_result', messageId: randomUUID(), toolUseId, content: mode === 'blocks' ? [{ type: 'text', text: body }] : body, isError: mode === 'failed' });
+        }
+        // Immediately request permission after the result, in the same stdout
+        // batch: a slow stream consumer must not race the next permission RPC.
+        send({ ...envelope('request'), id: 'permission-handle', method: 'droid.request_permission', params: {
+          toolUses: [{ toolUse: { type: 'tool_use', id: 'handle-use', name: 'amp-puck___puck', input: { action: 'read_reply', params: mode === 'missing' ? {} : { replyHandle: mode === 'foreign' ? `v1:${recipient}:M-abcdefghijkl0123456789` : handle } } }, confirmationType: 'mcp_tool', details: { type: 'mcp_tool', toolName: 'amp-puck___puck', impactLevel: 'low', serverName: 'amp-puck', actualToolName: 'puck' } }],
+          options: [{ label: 'Proceed once', value: 'proceed_once' }, { label: 'Cancel', value: 'cancel' }],
+        } }); return;
+      }
       if (prompt === 'permission' || prompt === 'permission-once') {
         send({ ...envelope('request'), id: 'permission-1', method: 'droid.request_permission', params: { toolUses: [], options: [...(prompt === 'permission-once' ? [{ label: 'Proceed once', value: 'proceed_once' }] : []), { label: 'Cancel', value: 'cancel' }] } }); return;
       }
@@ -138,10 +157,12 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (process.env.MOCK_IGNORE_INTERRUPT === '1') return;
       clearTimeout(timer); reply(req, {}); terminal('cancelled'); break;
     case 'droid.close_session':
-      if (process.env.MOCK_SLOW_CLOSE === '1') return;
+      if (process.env.MOCK_SLOW_CLOSE === '1' && !cwd.endsWith('/state')) return;
       reply(req, {}); break;
     default:
-      if (req.id === 'catalog-permission') {
+      if (req.id === 'permission-handle') {
+        text('handle permission observed'); terminal(req.result.selectedOption === 'proceed_once' ? 'completed' : 'permission_rejected');
+      } else if (req.id === 'catalog-permission') {
         if (req.result.selectedOption !== 'cancel') process.exit(14);
         process.exit(0);
       } else if (req.id === 'permission-1') {

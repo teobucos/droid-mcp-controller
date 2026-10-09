@@ -9,7 +9,7 @@
   },
   "scripts": {
     "start": "node src/server.mjs",
-    "test": "node --test --test-concurrency=1 test/e2e.test.mjs test/session-surface.test.mjs",
+    "test": "node --test --test-concurrency=1 test/*.test.mjs",
     "smoke": "node scripts/smoke.mjs",
     "check": "for f in src/*.mjs scripts/*.mjs; do node --check $f || exit 1; done && node scripts/gen-tool-reference.mjs --check",
     "docs": "node scripts/gen-tool-reference.mjs"
