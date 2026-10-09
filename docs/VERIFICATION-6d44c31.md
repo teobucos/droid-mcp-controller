@@ -8,6 +8,14 @@ This document does not contain credentials, prompts, personal conversation IDs,
 or the original artifacts. The earlier migration/review evidence remains in
 `docs/VERIFICATION-20b31df.md`; it is not upgraded by this correction.
 
+**Release status: this source was blocked by independent High review.** Its
+140 passing tests did not cover an unapproved historical call/result replay
+that revived a stale handle after cancelled detach and persisted it across
+reopen. This was a controlled-protocol counterexample, not a demonstrated live
+CLI exploit. The results below remain historical evidence for this exact source;
+they are not release acceptance. The subsequent approved-send correction requires
+exact-SHA re-review before merge or deployment.
+
 ## Measured failure and intended behavior
 
 An originating turn observed a successful Puck send with a queued reply handle.

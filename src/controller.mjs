@@ -278,7 +278,7 @@ export class Controller {
       execArgv: [],
       env: { ...process.env, FACTORY_DROID_AUTO_UPDATE_ENABLED: 'false' },
     });
-    const entry = { child, result: null, error: null, errorCode: null, reason: null, persisted: new Map() };
+    const entry = { child, result: null, error: null, errorCode: null, reason: null, persisted: new Map(), approvedReplySends: new Set() };
     this.workers.set(run.runId, entry);
     entry.timer = setTimeout(() => this.stopWorker(run, 'timeout'), this.config.runTimeoutMs);
     child.stderr.on('data', (data) => this.message(run, { kind: 'stderr', text: data.toString() }));
@@ -361,13 +361,21 @@ export class Controller {
 
   message(run, msg) {
     if (msg.kind === 'stderr') run.stderrTail = (run.stderrTail + msg.text).slice(-16000);
-    else if (msg.kind === 'reply_handle') {
-      if (!run.droidSessionId || msg.droidSessionId !== run.droidSessionId || !isReplyHandle(msg.handle, run.replyTo)) return;
-      if (!run.replyHandles.includes(msg.handle)) run.replyHandles.push(msg.handle);
-      this.changed(run); // Capability ownership is durable, never a coalesced progress write.
+    else if (msg.kind === 'reply_handles') {
+      const entry = this.workers.get(run.runId);
+      if (!run.droidSessionId || msg.droidSessionId !== run.droidSessionId
+        || !Array.isArray(msg.handles) || !msg.handles.every((handle) => isReplyHandle(handle, run.replyTo))
+        || !entry?.approvedReplySends.delete(msg.toolUseId)) return;
+      for (const handle of msg.handles) if (!run.replyHandles.includes(handle)) run.replyHandles.push(handle);
+      if (msg.handles.length) this.changed(run); // Ownership and its approval proof are durable before inheritance.
       return;
     } else if (msg.kind === 'event') {
-      if (msg.event.type === 'permission_declined') {
+      if (msg.event.type === 'permission_approved_once' && msg.event.droidSessionId === run.droidSessionId) {
+        const entry = this.workers.get(run.runId);
+        if (entry?.persisted.has('submission_intent')) for (const approval of msg.event.puckSendApprovals ?? []) {
+          if (approval.recipient === run.replyTo && typeof approval.toolUseId === 'string' && approval.toolUseId.length > 0) entry.approvedReplySends.add(approval.toolUseId);
+        }
+      } else if (msg.event.type === 'permission_declined') {
         run.permissionsDeclined = (run.permissionsDeclined ?? 0) + 1;
         if (msg.event.reason) run.permissionDenials = [...new Set([...(run.permissionDenials ?? []), msg.event.reason])];
       }

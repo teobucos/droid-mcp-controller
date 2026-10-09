@@ -7,7 +7,7 @@ import { createInterface } from 'node:readline';
 const home = process.env.MOCK_DROID_HOME;
 const audit = process.env.MOCK_AUDIT;
 let id, cwd, settings, turnId, timer, prompt, puckRecipient;
-let pendingHandleSend, requestedHandle;
+let pendingHandleSend, requestedHandle, pendingReplay;
 const tokens = { inputTokens: 7, outputTokens: 3, cacheCreationTokens: 0, cacheReadTokens: 0, thinkingTokens: 0 };
 const send = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
 const envelope = (type) => ({ jsonrpc: '2.0', type, factoryApiVersion: '1.0.0', factoryProtocolVersion: '1.245.0' });
@@ -30,6 +30,13 @@ function requestHandleRead(handle, mode) {
     toolUses: [{ toolUse: { type: 'tool_use', id: 'handle-use', name: 'amp-puck___puck', input: { action: 'read_reply', params: requestedHandle === undefined ? {} : { replyHandle: requestedHandle } } }, confirmationType: 'mcp_tool', details: { type: 'mcp_tool', toolName: 'amp-puck___puck', impactLevel: 'low', serverName: 'amp-puck', actualToolName: 'puck' } }],
     options: [{ label: 'Proceed once', value: 'proceed_once' }, { label: 'Cancel', value: 'cancel' }],
   } });
+}
+
+function replaySend(saved) {
+  const now = Date.now();
+  notify({ type: 'create_message', message: { id: randomUUID(), role: 'assistant', content: [saved.toolUse], createdAt: now, updatedAt: now } });
+  notify({ type: 'tool_result', messageId: randomUUID(), toolUseId: saved.toolUse.id, content: saved.body, isError: false });
+  requestHandleRead(JSON.parse(saved.body).replyHandle);
 }
 
 if (process.argv.slice(2).join(' ') !== 'exec --input-format stream-jsonrpc --output-format stream-jsonrpc') process.exit(2);
@@ -108,6 +115,17 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (prompt === 'malformed') { process.stdout.write('{invalid json\n'); return; }
       if (prompt === 'silent') return;
       if (prompt === 'wrong-turn') { terminal('completed', randomUUID()); return; }
+      if (['replay-historical-send', 'replay-other-approval', 'replay-foreign-approval'].includes(prompt)) {
+        pendingReplay = JSON.parse(readFileSync(`${home}/${id}.send.json`, 'utf8'));
+        if (prompt === 'replay-historical-send') { replaySend(pendingReplay); return; }
+        const toolUse = { ...pendingReplay.toolUse, id: prompt === 'replay-other-approval' ? randomUUID() : pendingReplay.toolUse.id,
+          input: { action: 'send', params: { ...pendingReplay.toolUse.input.params, ...(prompt === 'replay-foreign-approval' ? { conversationID: 'T-99999999-9999-4999-8999-999999999999' } : {}) } } };
+        send({ ...envelope('request'), id: 'permission-replay-send', method: 'droid.request_permission', params: {
+          toolUses: [{ toolUse, confirmationType: 'mcp_tool', details: { type: 'mcp_tool', toolName: 'amp-puck___puck', impactLevel: 'low', serverName: 'amp-puck', actualToolName: 'puck' } }],
+          options: [{ label: 'Proceed once', value: 'proceed_once' }, { label: 'Cancel', value: 'cancel' }],
+        } });
+        return;
+      }
       if (prompt.startsWith('puck-handle:')) {
         const mode = prompt.slice('puck-handle:'.length);
         const recipient = text0.match(/conversationID: (T-[0-9a-f-]{36})/)?.[1];
@@ -169,9 +187,12 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (process.env.MOCK_SLOW_CLOSE === '1' && !cwd.endsWith('/state')) return;
       reply(req, {}); break;
     default:
-      if (req.id === 'permission-handle-send') {
+      if (req.id === 'permission-replay-send') {
+        replaySend(pendingReplay);
+      } else if (req.id === 'permission-handle-send') {
         const { mode, sentTo, toolUseId, handle } = pendingHandleSend;
         const body = JSON.stringify({ status: 'queued', conversationID: sentTo, replyHandle: handle });
+        writeFileSync(`${home}/${id}.send.json`, JSON.stringify({ toolUse: { type: 'tool_use', id: toolUseId, name: 'amp-puck___puck', input: { action: 'send', params: { conversationID: sentTo, message: 'fixture checkpoint' } } }, body }));
         notify({ type: 'tool_result', messageId: randomUUID(), toolUseId, content: mode === 'blocks' ? [{ type: 'text', text: body }] : body, isError: mode === 'failed' || req.result.selectedOption !== 'proceed_once' });
         // Same stdout batch: observation must beat the following permission RPC.
         requestHandleRead(handle, mode);

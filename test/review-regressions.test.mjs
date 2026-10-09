@@ -154,6 +154,40 @@ test('delayed reply: same-session continuation retrieves an owned handle before 
   } finally { await stop(again); }
 });
 
+test('delayed reply: replayed send without current approval cannot revive cancelled-detach ownership, including reopen', async (t) => {
+  const h = await fixture(t, { ampMcp: {} });
+  const recipient = 'T-11111111-1111-4111-8111-111111111111';
+  const a = await call(h, 'droid_create_session', { requestKey: 'original-send', prompt: 'puck-handle:valid', model: 'mock-model', autonomy: 'off', workspace: join(h.dir, 'workspace'), replyTo: recipient });
+  const session = a.metadata.session; await h.settle(session);
+  const handle = await sentHandle(h, session);
+  await h.send(session, 'active', 'silent');
+  await until(() => h.turns().some((request) => request.params.text.startsWith('silent')));
+  const detached = await h.send(session, 'queued-detach', 'must never run', { replyTo: null });
+  assert.equal(detached.status.latestRun.state, 'queued');
+  await call(h, 'droid_cancel_session', { session }); await h.settle(session);
+  assert.equal((await h.send(session, 'queued-detach', 'must never run', { replyTo: null })).runId, detached.runId);
+  await h.send(session, 'reattach', `puck-read:${handle}`, { replyTo: recipient, autonomy: 'high' });
+  assert.equal((await h.settle(session)).sessions[0].latestRun.permissionsDeclined, 1);
+  const replays = [];
+  for (const mode of ['replay-historical-send', 'replay-other-approval', 'replay-foreign-approval']) {
+    await h.send(session, mode, mode, { autonomy: mode === 'replay-foreign-approval' ? 'high' : 'low' });
+    replays.push((await h.settle(session)).sessions[0]);
+  }
+  await stop(h);
+  const again = await boot({ ampMcp: {} }, {}, h.dir);
+  try {
+    await call(again, 'droid_send_message', { session, requestKey: 'reopened', message: `puck-read:${handle}`, model: 'mock-model', autonomy: 'off' });
+    const restored = (await call(again, 'droid_wait_for_sessions', { sessions: [session], timeoutSeconds: 15 })).sessions[0];
+    for (const status of [...replays, restored]) {
+      assert.equal(status.latestRun.permissionsDeclined, 1, 'replay without matching approval and reopened read must be denied');
+      assert.equal(status.latestRun.needsAttention, true);
+      assert.ok(!status.preview.text.includes('DELAYED_ACK'));
+    }
+    const history = await call(again, 'droid_read_session', { session, limit: 100 });
+    assert.equal(history.messages.filter((message) => message.type === 'tool_result' && message.text.includes('"reply":"DELAYED_ACK"')).length, 1, 'only the original approved turn can retrieve its ACK');
+  } finally { await stop(again); }
+});
+
 test('delayed reply: ownership excludes foreign sessions, bad handles and detached or stale routing, including high', async (t) => {
   const h = await fixture(t, { ampMcp: {} });
   const recipient = 'T-11111111-1111-4111-8111-111111111111';

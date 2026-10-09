@@ -29,8 +29,11 @@ workers it spawns, and the Droid to Puck reply path. Same host, same service use
   is account-level (scope `email offline_access openid profile`).
 - **Narrow permission exception.** A routed session approves, single use, only
   `amp-puck___puck` `send` to its own `replyTo` or `read_reply` of a proven owned handle,
-  so read-only reviewers can report. Observed successful send results grant durable
+  so read-only reviewers can report. Current-turn approved send IDs and their
+  matching own-recipient non-error results grant durable
   ownership within that controller session and uninterrupted recipient route.
+  Raw call/result replay cannot grant ownership; the controller checks and consumes
+  the bound worker's matching current-run approval before persisting a grant.
   Continuation and restart preserve it; an accepted detach or retarget invalidates
   old handles even if routing later returns. Missing, foreign or unobserved handles
   are denied even at autonomy `high`. Other permissions retain the existing

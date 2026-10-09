@@ -127,7 +127,9 @@ process.on('message', async (msg) => {
   let terminal;
   let failure;
   let failureCode;
+  let submissionPersisted = false;
   const toolNames = new Map();
+  const approvedSends = new Map();
   const replyHandles = new Set(msg.replyHandles ?? []);
   const transport = new ProcessTransport({
     droidExecPath: config.droidPath, cwd: run.workspace,
@@ -144,11 +146,15 @@ process.on('message', async (msg) => {
     } else if (message.type === 'tool_result' && toolNames.has(message.toolUseId)) {
       const sentTo = toolNames.get(message.toolUseId);
       toolNames.delete(message.toolUseId);
-      if (message.isError === false && sentTo === run.replyTo) for (const handle of replyHandlesFromContent(message.content, run.replyTo)) {
+      const approved = approvedSends.get(message.toolUseId) === sentTo;
+      approvedSends.delete(message.toolUseId);
+      if (approved && sentTo === run.replyTo) {
+        const handles = message.isError === false ? replyHandlesFromContent(message.content, run.replyTo) : [];
         // Receipt precedes the following permission RPC; parent IPC is ordered
-        // and persisted before another worker can inherit this capability.
-        replyHandles.add(handle);
-        void send({ kind: 'reply_handle', handle, droidSessionId: session.id }).catch(() => {});
+        // and persisted before another worker can inherit this capability. An
+        // error or handle-less result consumes approval without granting one.
+        for (const handle of handles) replyHandles.add(handle);
+        void send({ kind: 'reply_handles', handles, toolUseId: message.toolUseId, droidSessionId: session.id }).catch(() => {});
       }
       void send(message.isError
         ? { kind: 'reply', state: 'failed', code: 'reply_failed', message: 'The Amp MCP rejected the agent\'s report' }
@@ -186,7 +192,16 @@ process.on('message', async (msg) => {
         const proceed = ownedReads && (run.autonomy === 'high' || ownPuck) && available;
         const reason = !available ? 'Single-use approval is unavailable.' : !ownedReads
           ? 'The reply handle has no observed ownership in this session and current recipient route.' : 'The requested tool exceeds this turn\'s autonomy policy.';
-        void event({ type: proceed ? 'permission_approved_once' : 'permission_declined', ...(!proceed ? { reason } : {}), details: JSON.stringify(params).slice(0, 4000) }).catch(() => {});
+        const puckSendApprovals = proceed && routed && submissionPersisted ? (params.toolUses ?? [])
+          .filter(({ toolUse, confirmationType }) => confirmationType === 'mcp_tool' && toolUse?.name === PUCK_TOOL
+            && toolUse.input?.action === 'send' && toolUse.input?.params?.conversationID === run.replyTo
+            && typeof toolUse.id === 'string' && toolUse.id.length > 0)
+          .map(({ toolUse }) => ({ toolUseId: toolUse.id, recipient: run.replyTo })) : [];
+        for (const { toolUseId, recipient } of puckSendApprovals) approvedSends.set(toolUseId, recipient);
+        // Compact proof survives event-detail clipping. It precedes the result
+        // on this run's bound IPC channel; raw notifications cannot create it.
+        void event({ type: proceed ? 'permission_approved_once' : 'permission_declined', ...(!proceed ? { reason } : {}),
+          ...(puckSendApprovals.length ? { puckSendApprovals, droidSessionId: session.id } : {}), details: JSON.stringify(params).slice(0, 4000) }).catch(() => {});
         // SDK 0.9.1 forwards comment on RequestPermissionResult to the CLI.
         return proceed ? ToolConfirmationOutcome.ProceedOnce : { selectedOption: ToolConfirmationOutcome.Cancel, comment: `Controller policy: ${reason}` };
       },
@@ -240,6 +255,7 @@ Always call the puck tool directly even in Spec mode; never call ExitSpecMode me
     // This is durable intent, NOT evidence of Factory acceptance or exactly-once
     // execution. A crash after this ACK leaves a potentially submitted turn.
     await persist(run, 'submission_intent', config.ackTimeoutMs);
+    submissionPersisted = true;
     for await (const message of session.stream(submitted)) {
       if (message.type === 'result') terminal = message;
       else {
