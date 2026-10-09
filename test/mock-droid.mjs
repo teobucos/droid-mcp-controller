@@ -7,6 +7,7 @@ import { createInterface } from 'node:readline';
 const home = process.env.MOCK_DROID_HOME;
 const audit = process.env.MOCK_AUDIT;
 let id, cwd, settings, turnId, timer, prompt, puckRecipient;
+let pendingHandleSend, requestedHandle;
 const tokens = { inputTokens: 7, outputTokens: 3, cacheCreationTokens: 0, cacheReadTokens: 0, thinkingTokens: 0 };
 const send = (msg) => process.stdout.write(`${JSON.stringify(msg)}\n`);
 const envelope = (type) => ({ jsonrpc: '2.0', type, factoryApiVersion: '1.0.0', factoryProtocolVersion: '1.245.0' });
@@ -21,6 +22,14 @@ function text(value) {
 }
 function persist() {
   writeFileSync(`${home}/${id}.json`, JSON.stringify({ cwd, settings }));
+}
+
+function requestHandleRead(handle, mode) {
+  requestedHandle = mode === 'missing' ? undefined : mode === 'foreign' ? handle.replace(/M-.+$/, 'M-abcdefghijkl0123456789') : handle;
+  send({ ...envelope('request'), id: 'permission-handle', method: 'droid.request_permission', params: {
+    toolUses: [{ toolUse: { type: 'tool_use', id: 'handle-use', name: 'amp-puck___puck', input: { action: 'read_reply', params: requestedHandle === undefined ? {} : { replyHandle: requestedHandle } } }, confirmationType: 'mcp_tool', details: { type: 'mcp_tool', toolName: 'amp-puck___puck', impactLevel: 'low', serverName: 'amp-puck', actualToolName: 'puck' } }],
+    options: [{ label: 'Proceed once', value: 'proceed_once' }, { label: 'Cancel', value: 'cancel' }],
+  } });
 }
 
 if (process.argv.slice(2).join(' ') !== 'exec --input-format stream-jsonrpc --output-format stream-jsonrpc') process.exit(2);
@@ -102,21 +111,21 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (prompt.startsWith('puck-handle:')) {
         const mode = prompt.slice('puck-handle:'.length);
         const recipient = text0.match(/conversationID: (T-[0-9a-f-]{36})/)?.[1];
-        const handle = `v1:${recipient}:M-0123456789abcdefghijkl`;
+        const handle = `v1:${recipient}:M-${randomUUID().replaceAll('-', '').slice(0, 22)}`;
         if (!['missing', 'stale'].includes(mode)) {
           const sentTo = mode === 'misrouted' ? 'T-99999999-9999-4999-8999-999999999999' : recipient;
           const toolUseId = randomUUID();
-          notify({ type: 'create_message', message: { id: randomUUID(), role: 'assistant', content: [{ type: 'tool_use', id: toolUseId, name: 'amp-puck___puck', input: { action: 'send', params: { conversationID: sentTo, message: 'fixture checkpoint' } } }], createdAt: now, updatedAt: now } });
-          const body = JSON.stringify({ status: 'queued', conversationID: sentTo, replyHandle: handle });
-          notify({ type: 'tool_result', messageId: randomUUID(), toolUseId, content: mode === 'blocks' ? [{ type: 'text', text: body }] : body, isError: mode === 'failed' });
+          const toolUse = { type: 'tool_use', id: toolUseId, name: 'amp-puck___puck', input: { action: 'send', params: { conversationID: sentTo, message: 'fixture checkpoint' } } };
+          notify({ type: 'create_message', message: { id: randomUUID(), role: 'assistant', content: [toolUse], createdAt: now, updatedAt: now } });
+          pendingHandleSend = { mode, sentTo, toolUseId, handle };
+          send({ ...envelope('request'), id: 'permission-handle-send', method: 'droid.request_permission', params: {
+            toolUses: [{ toolUse, confirmationType: 'mcp_tool', details: { type: 'mcp_tool', toolName: 'amp-puck___puck', impactLevel: 'low', serverName: 'amp-puck', actualToolName: 'puck' } }],
+            options: [{ label: 'Proceed once', value: 'proceed_once' }, { label: 'Cancel', value: 'cancel' }],
+          } }); return;
         }
-        // Immediately request permission after the result, in the same stdout
-        // batch: a slow stream consumer must not race the next permission RPC.
-        send({ ...envelope('request'), id: 'permission-handle', method: 'droid.request_permission', params: {
-          toolUses: [{ toolUse: { type: 'tool_use', id: 'handle-use', name: 'amp-puck___puck', input: { action: 'read_reply', params: mode === 'missing' ? {} : { replyHandle: mode === 'foreign' ? `v1:${recipient}:M-abcdefghijkl0123456789` : handle } } }, confirmationType: 'mcp_tool', details: { type: 'mcp_tool', toolName: 'amp-puck___puck', impactLevel: 'low', serverName: 'amp-puck', actualToolName: 'puck' } }],
-          options: [{ label: 'Proceed once', value: 'proceed_once' }, { label: 'Cancel', value: 'cancel' }],
-        } }); return;
+        requestHandleRead(handle, mode); return;
       }
+      if (prompt.startsWith('puck-read:')) { requestHandleRead(prompt.slice('puck-read:'.length)); return; }
       if (prompt === 'permission' || prompt === 'permission-once') {
         send({ ...envelope('request'), id: 'permission-1', method: 'droid.request_permission', params: { toolUses: [], options: [...(prompt === 'permission-once' ? [{ label: 'Proceed once', value: 'proceed_once' }] : []), { label: 'Cancel', value: 'cancel' }] } }); return;
       }
@@ -160,8 +169,19 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (process.env.MOCK_SLOW_CLOSE === '1' && !cwd.endsWith('/state')) return;
       reply(req, {}); break;
     default:
-      if (req.id === 'permission-handle') {
-        text('handle permission observed'); terminal(req.result.selectedOption === 'proceed_once' ? 'completed' : 'permission_rejected');
+      if (req.id === 'permission-handle-send') {
+        const { mode, sentTo, toolUseId, handle } = pendingHandleSend;
+        const body = JSON.stringify({ status: 'queued', conversationID: sentTo, replyHandle: handle });
+        notify({ type: 'tool_result', messageId: randomUUID(), toolUseId, content: mode === 'blocks' ? [{ type: 'text', text: body }] : body, isError: mode === 'failed' || req.result.selectedOption !== 'proceed_once' });
+        // Same stdout batch: observation must beat the following permission RPC.
+        requestHandleRead(handle, mode);
+      } else if (req.id === 'permission-handle') {
+        if (req.result.selectedOption === 'proceed_once') {
+          const now = Date.now();
+          notify({ type: 'create_message', message: { id: randomUUID(), role: 'assistant', content: [{ type: 'tool_use', id: 'handle-use', name: 'amp-puck___puck', input: { action: 'read_reply', params: { replyHandle: requestedHandle } } }], createdAt: now, updatedAt: now } });
+          notify({ type: 'tool_result', messageId: randomUUID(), toolUseId: 'handle-use', content: JSON.stringify({ status: 'completed', replyHandle: requestedHandle, reply: 'DELAYED_ACK' }), isError: false });
+          text('DELAYED_ACK'); terminal('completed');
+        } else { text(req.result.comment ?? 'permission denied'); terminal('permission_rejected'); }
       } else if (req.id === 'catalog-permission') {
         if (req.result.selectedOption !== 'cancel') process.exit(14);
         process.exit(0);

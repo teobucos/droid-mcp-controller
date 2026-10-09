@@ -94,7 +94,7 @@ test('compatibility: omitted default autonomy respects an explicit off ceiling',
   assert.ok(audit(h).some((x) => x.id === 'permission-1' && x.result?.selectedOption === 'cancel'));
 });
 
-test('R3: actual SDK permission path scopes reply handles to successful sends in this run', async (t) => {
+test('R3: actual SDK permission path requires an observed owned reply handle', async (t) => {
   const h = await fixture(t, { ampMcp: {} });
   const recipient = 'T-11111111-1111-4111-8111-111111111111';
   const a = await h.create('route-base', 'base');
@@ -106,7 +106,7 @@ test('R3: actual SDK permission path scopes reply handles to successful sends in
     const result = audit(h).slice(start).find((x) => x.id === 'permission-handle' && x.result);
     assert.equal(result?.result.selectedOption, ['valid', 'blocks'].includes(mode) ? 'proceed_once' : 'cancel', mode);
   }
-  // Retargeting and detaching also start fresh per-run capability sets.
+  // Retargeting and detaching must never grant an unobserved handle.
   for (const replyTo of ['T-22222222-2222-4222-8222-222222222222', null]) {
     const start = audit(h).length;
     await h.send(session, `retarget-${replyTo}`, 'puck-handle:stale', { replyTo }); await h.settle(session);
@@ -114,7 +114,7 @@ test('R3: actual SDK permission path scopes reply handles to successful sends in
   }
   const start = audit(h).length;
   await h.send(session, 'high-policy', 'puck-handle:missing', { replyTo: recipient, autonomy: 'high' }); await h.settle(session);
-  assert.equal(audit(h).slice(start).find((x) => x.id === 'permission-handle')?.result.selectedOption, 'proceed_once', 'high retains its general single-use approval policy, not route-scoped authorization');
+  assert.equal(audit(h).slice(start).find((x) => x.id === 'permission-handle')?.result.selectedOption, 'cancel', 'even high cannot invent reply ownership');
   await stop(h);
   const again = await boot({ ampMcp: {} }, {}, h.dir);
   try {
@@ -124,6 +124,104 @@ test('R3: actual SDK permission path scopes reply handles to successful sends in
     assert.equal(audit(again).slice(start).find((x) => x.id === 'permission-handle')?.result.selectedOption, 'cancel');
   } finally { await stop(again); }
 });
+
+async function sentHandle(h, session) {
+  const history = await call(h, 'droid_read_session', { session, limit: 100 });
+  return JSON.parse(history.messages.find((m) => m.type === 'tool_result' && m.text.startsWith('{"status":"queued"')).text).replyHandle;
+}
+
+test('delayed reply: same-session continuation retrieves an owned handle before and after restart without resending', async (t) => {
+  const h = await fixture(t, { ampMcp: {} });
+  const a = await call(h, 'droid_create_session', { requestKey: 'checkpoint', prompt: 'puck-handle:valid', model: 'mock-model', autonomy: 'off', workspace: join(h.dir, 'workspace'), replyTo: 'T-11111111-1111-4111-8111-111111111111' });
+  const session = a.metadata.session; await h.settle(session);
+  const handle = await sentHandle(h, session);
+  await h.send(session, 'delayed-read', `puck-read:${handle}`, { autonomy: 'off' });
+  const status = (await h.settle(session)).sessions[0];
+  assert.equal(status.latestRun.permissionsDeclined, 0);
+  assert.equal(status.latestRun.needsAttention, false);
+  assert.equal(status.preview.text, 'DELAYED_ACK');
+  assert.equal(status.notification.state, 'not_sent', 'a read does not claim another report');
+  await stop(h);
+  const again = await boot({ ampMcp: {} }, {}, h.dir);
+  try {
+    await call(again, 'droid_send_message', { session, requestKey: 'restored-read', message: `puck-read:${handle}`, model: 'mock-model', autonomy: 'off' });
+    const restored = (await call(again, 'droid_wait_for_sessions', { sessions: [session], timeoutSeconds: 15 })).sessions[0];
+    assert.equal(restored.preview.text, 'DELAYED_ACK');
+    assert.equal(restored.latestRun.permissionsDeclined, 0);
+    const history = await call(again, 'droid_read_session', { session, limit: 100 });
+    assert.equal(history.messages.filter((m) => m.type === 'tool_call' && m.text.startsWith('amp-puck___puck') && m.text.includes('"action":"send"')).length, 1);
+    assert.equal(history.messages.filter((m) => m.type === 'tool_result' && m.text.includes('"reply":"DELAYED_ACK"')).length, 3);
+  } finally { await stop(again); }
+});
+
+test('delayed reply: ownership excludes foreign sessions, bad handles and detached or stale routing, including high', async (t) => {
+  const h = await fixture(t, { ampMcp: {} });
+  const recipient = 'T-11111111-1111-4111-8111-111111111111';
+  const a = await h.create('owner', 'base'); const session = a.metadata.session; await h.settle(session);
+  await h.send(session, 'send-checkpoint', 'puck-handle:valid', { replyTo: recipient }); await h.settle(session);
+  const handle = await sentHandle(h, session);
+  const b = await h.create('foreign', 'base'); await h.settle(b.metadata.session);
+  for (const [key, target, token, route, autonomy] of [
+    ['foreign-session', b.metadata.session, handle, recipient, 'off'],
+    ['malformed', session, 'not-a-handle', recipient, 'off'],
+    ['foreign-handle', session, `v1:${recipient}:M-abcdefghijkl0123456789`, recipient, 'off'],
+    ['detached', session, handle, null, 'off'],
+    ['reattached', session, handle, recipient, 'off'],
+    ['foreign-recipient', session, handle, 'T-22222222-2222-4222-8222-222222222222', 'off'],
+    ['retargeted-back', session, handle, recipient, 'high'],
+  ]) {
+    await h.send(target, key, `puck-read:${token}`, { replyTo: route, autonomy });
+    const status = (await h.settle(target)).sessions[0];
+    assert.equal(status.latestRun.permissionsDeclined, 1, key);
+    assert.equal(status.latestRun.needsAttention, true, key);
+    const history = await call(h, 'droid_read_session', { session: target, limit: 100 });
+    assert.ok(history.messages.some((m) => m.runId === status.latestRun.runId && m.role === 'controller' && /reply handle.*ownership/i.test(m.text)), key);
+  }
+  // A fresh checkpoint in the new route grants only its new handle, not the old one.
+  await h.send(session, 'fresh-checkpoint', 'puck-handle:valid', { replyTo: recipient }); await h.settle(session);
+  await h.send(session, 'old-after-fresh', `puck-read:${handle}`); await h.settle(session);
+  assert.equal((await call(h, 'droid_get_session_status', { session })).latestRun.permissionsDeclined, 1);
+  await stop(h);
+  const state = readState(h);
+  // A clock adjustment must not revive the old route when history is sorted.
+  Object.values(state.runs).find((r) => r.requestKey === 'send-checkpoint').createdAt = '2099-01-01T00:00:00Z';
+  writeFileSync(join(h.dir, 'state/state.json'), JSON.stringify(state));
+  const again = await boot({ ampMcp: {} }, {}, h.dir);
+  try {
+    await call(again, 'droid_send_message', { session, requestKey: 'restored-stale', message: `puck-read:${handle}`, model: 'mock-model', autonomy: 'off' });
+    const status = (await call(again, 'droid_wait_for_sessions', { sessions: [session], timeoutSeconds: 15 })).sessions[0];
+    assert.equal(status.latestRun.permissionsDeclined, 1);
+  } finally { await stop(again); }
+});
+
+for (const proof of ['valid', 'no-approval', 'truncated-approval', 'foreign-uuid', 'failed-result', 'wrong-tool-id', 'quoted-only']) {
+  test(`delayed reply: prompt-free old v3 restore requires correlated observed provenance (${proof})`, async (t) => {
+    const h = await fixture(t, { ampMcp: {} });
+    const a = await h.create('old-v3', 'base'); const session = a.metadata.session; await h.settle(session);
+    const sent = await h.send(session, 'old-send', 'puck-handle:valid', { replyTo: 'T-11111111-1111-4111-8111-111111111111' }); await h.settle(session);
+    const handle = await sentHandle(h, session);
+    await stop(h);
+    const state = readState(h); const run = state.runs[sent.runId]; delete run.replyHandles;
+    const path = join(h.dir, 'state', `${sent.runId}.result.json`);
+    const result = JSON.parse(readFileSync(path, 'utf8'));
+    const approval = run.events.find((e) => e.type === 'permission_approved_once' && e.details.includes('"action":"send"'));
+    const returned = result.messages.find((m) => m.type === 'tool_result' && typeof m.content === 'string' && m.content.startsWith('{"status":"queued"'));
+    if (proof === 'no-approval') run.events = [];
+    if (proof === 'truncated-approval') approval.details = approval.details.slice(0, -4);
+    if (proof === 'foreign-uuid') result.sessionId = '99999999-9999-4999-8999-999999999999';
+    if (proof === 'failed-result') returned.isError = true;
+    if (proof === 'wrong-tool-id') returned.toolUseId = 'unobserved-send-id';
+    if (proof === 'quoted-only') result.messages = [{ type: 'assistant', text: returned.content }];
+    writeFileSync(join(h.dir, 'state/state.json'), JSON.stringify(state)); writeFileSync(path, JSON.stringify(result));
+    const again = await boot({ ampMcp: {} }, {}, h.dir);
+    try {
+      await call(again, 'droid_send_message', { session, requestKey: 'old-delayed-read', message: `puck-read:${handle}`, model: 'mock-model', autonomy: 'off' });
+      const status = (await call(again, 'droid_wait_for_sessions', { sessions: [session], timeoutSeconds: 15 })).sessions[0];
+      assert.equal(status.latestRun.permissionsDeclined, proof === 'valid' ? 0 : 1);
+      assert.equal(status.preview.text === 'DELAYED_ACK', proof === 'valid');
+    } finally { await stop(again); }
+  });
+}
 
 for (const unrelated of [false, true]) test(`catalog: verified lifecycle metadata, initialization correlation (unrelated=${unrelated})`, async (t) => {
   const h = await fixture(t, {}, unrelated ? { MOCK_CATALOG_UNRELATED: '1' } : {});

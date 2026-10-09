@@ -28,8 +28,19 @@ workers it spawns, and the Droid to Puck reply path. Same host, same service use
   is usable. This is model-context policy, **not** credential scoping: the OAuth grant
   is account-level (scope `email offline_access openid profile`).
 - **Narrow permission exception.** A routed session approves, single use, only
-  `amp-puck___puck` `send` to its own `replyTo` or `read_reply`, so read-only reviewers can
-  report. Any other permission still needs autonomy `high` and `ProceedOnce`.
+  `amp-puck___puck` `send` to its own `replyTo` or `read_reply` of a proven owned handle,
+  so read-only reviewers can report. Observed successful send results grant durable
+  ownership within that controller session and uninterrupted recipient route.
+  Continuation and restart preserve it; an accepted detach or retarget invalidates
+  old handles even if routing later returns. Missing, foreign or unobserved handles
+  are denied even at autonomy `high`. Other permissions retain the existing
+  single-use high-autonomy policy. Policy declines carry a controller reason in
+  the permission response and retained history; SDK success is not task acceptance.
+- **Legacy ownership backfill.** Old prompt-free records require an originating
+  run's approved send tool-use ID and corresponding non-error SDK call/result,
+  matching that run's Factory UUID and explicit recipient. Assistant prose,
+  copied historical tool results, missing/truncated approvals and corrupt/missing
+  result files cannot grant ownership. Runs with insufficient proof remain denied.
 - **Observed, not claimed, reporting.** `notification` records what the worker saw the
   agent's tool call do. A report to another conversation is `reply_misrouted`;
   acceptance is never described as delivery.
