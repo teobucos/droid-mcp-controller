@@ -182,13 +182,16 @@ Every routed turn receives the explicit recipient, the controller session and ru
 handles, and how to call `{action:"send",params:{conversationID,message}}` and
 `{action:"read_reply",params:{replyHandle}}`. Routed sessions may approve, as a
 single use, only that tool: `send` to their own `replyTo`, or `read_reply`
-with a nonempty recognized handle from a successful own-recipient send in **this run**
-(so read-only reviewers can report). Missing, foreign, failed-send and old-run handles
-are not pre-approved. Handles are memory-only and reset on continuation, retarget and
-restart. The parser accepts a top-level JSON `replyHandle` in string/text-block results;
-unknown result formats fail closed. These are local pre-approval rules: autonomy `high`
-still approves any offered single-use permission, including other Puck calls. Neither
-policy is OAuth credential scoping or OS isolation.
+with a recognized handle proven by an originating-turn approved own-recipient send and
+its correlated non-error result (so read-only reviewers can report). Ownership is
+durable within the same controller session and uninterrupted recipient route;
+continuation and restart preserve it. Accepted detach/retarget invalidates old
+handles, even if that turn is cancelled or routing later returns. Missing,
+malformed, foreign and unproven handles are denied even at autonomy `high`.
+Replayed call/result notifications without a new approved send cannot grant
+ownership. The parser accepts a top-level JSON `replyHandle` in string/text-block
+results; unknown formats fail closed. Other high-autonomy single-use approvals
+remain unchanged. These rules are not OAuth credential scoping or OS isolation.
 
 Progress is sent once, fire-and-forget; continue authorized independent work. A
 question, blocker or costly/irreversible step needing steering uses one CHECKPOINT

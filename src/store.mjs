@@ -22,6 +22,8 @@ const baseRun = z.object({
   droidSessionId: z.string().uuid().nullable(),
   state: z.enum(RUN_STATES),
   events: z.array(z.object({ type: z.string() }).passthrough()), textTail: z.string(), stderrTail: z.string(),
+  replyHandles: z.array(z.string()).optional(),
+  replyRouteId: z.string().uuid().optional(),
 }).passthrough();
 const identity = { host: z.string(), home: z.string(), factoryHomeOverride: z.string().nullable() };
 const sessionRecord = z.object({

@@ -89,7 +89,7 @@ export function resultMessages(run, result) {
 // after the head moves on, so a later follow-up cannot hide them.
 export function turnNotices(run) {
   const notices = (run.questions ?? []).map((q, index) => ({ id: `${run.runId}:question:${index}`, runId: run.runId, role: 'controller', type: 'notice', ...clip(`Declined AskUser question: ${q.question}${q.options.length ? ` [options: ${q.options.join(' | ')}]` : ''}`) }));
-  if (run.permissionsDeclined) notices.push({ id: `${run.runId}:permissions`, runId: run.runId, role: 'controller', type: 'notice', ...clip(`${run.permissionsDeclined} tool permission request(s) were declined by policy`) });
+  if (run.permissionsDeclined) notices.push({ id: `${run.runId}:permissions`, runId: run.runId, role: 'controller', type: 'notice', ...clip(`${run.permissionsDeclined} tool permission request(s) were declined by policy${run.permissionDenials?.length ? `: ${run.permissionDenials.join(' ')}` : ''}`) });
   return notices;
 }
 

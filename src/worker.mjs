@@ -1,8 +1,8 @@
 import { createSession, resumeSession, ProcessTransport, ToolConfirmationOutcome } from '@factory/droid-sdk/node';
 import { randomUUID } from 'node:crypto';
 import { approvedWorkspace } from './config.mjs';
+import { PUCK_TOOL, replyHandlesFromContent } from './puck.mjs';
 
-const PUCK_TOOL = 'amp-puck___puck';
 // Default deny: only puck is wanted from the Amp endpoint. Observed live, the thread-free
 // external-agent endpoint also offers manage_amp (admin) and find_thread/read_thread (read other
 // Amp threads); these are denied up front. The preflight then lists what the server really
@@ -99,27 +99,13 @@ async function preflightAmpMcp() {
   if (!cancelled) throw new SetupError('amp_mcp_unreachable', 'The Amp MCP did not finish connecting in time');
 }
 
-// Only this run's successful send results grant read_reply pre-approval. Handles
-// are deliberately not inherited across continuation, retargeting or restart.
+// The controller supplies only observed handles from the same session's current
+// uninterrupted recipient route. Successful sends in this turn add ownership.
 function isOwnPuckCall(params, replyTo, replyHandles) {
   const uses = params.toolUses ?? [];
   return uses.length > 0 && uses.every(({ toolUse, confirmationType }) => confirmationType === 'mcp_tool' && toolUse?.name === PUCK_TOOL
     && ((toolUse.input?.action === 'read_reply' && replyHandles.has(toolUse.input?.params?.replyHandle))
       || (toolUse.input?.action === 'send' && toolUse.input?.params?.conversationID === replyTo)));
-}
-
-function rememberReplyHandle(content, replyTo, handles) {
-  // SDK 0.9.1 preserves string or MCP text-block results. Do not scan arbitrary
-  // prose/quoted replies for capabilities. Unknown result formats fail closed.
-  const texts = typeof content === 'string' ? [content] : Array.isArray(content) ? content.filter((block) => block.type === 'text').map((block) => block.text) : [];
-  for (const text of texts) {
-    let result;
-    try { result = JSON.parse(text); } catch { continue; }
-    const handle = result?.replyHandle;
-    // Pattern verified from the authenticated Amp puck input schema (2026-10-08).
-    if (typeof handle === 'string' && new RegExp(`^v1:${replyTo}:M-[0-9A-Za-z]{22}$`).test(handle)
-      && (result.conversationID === undefined || result.conversationID === replyTo)) handles.add(handle);
-  }
 }
 
 process.on('message', async (msg) => {
@@ -141,8 +127,10 @@ process.on('message', async (msg) => {
   let terminal;
   let failure;
   let failureCode;
+  let submissionPersisted = false;
   const toolNames = new Map();
-  const replyHandles = new Set();
+  const approvedSends = new Map();
+  const replyHandles = new Set(msg.replyHandles ?? []);
   const transport = new ProcessTransport({
     droidExecPath: config.droidPath, cwd: run.workspace,
     env: { FACTORY_DROID_AUTO_UPDATE_ENABLED: 'false' },
@@ -158,7 +146,16 @@ process.on('message', async (msg) => {
     } else if (message.type === 'tool_result' && toolNames.has(message.toolUseId)) {
       const sentTo = toolNames.get(message.toolUseId);
       toolNames.delete(message.toolUseId);
-      if (!message.isError && sentTo === run.replyTo) rememberReplyHandle(message.content, run.replyTo, replyHandles);
+      const approved = approvedSends.get(message.toolUseId) === sentTo;
+      approvedSends.delete(message.toolUseId);
+      if (approved && sentTo === run.replyTo) {
+        const handles = message.isError === false ? replyHandlesFromContent(message.content, run.replyTo) : [];
+        // Receipt precedes the following permission RPC; parent IPC is ordered
+        // and persisted before another worker can inherit this capability. An
+        // error or handle-less result consumes approval without granting one.
+        for (const handle of handles) replyHandles.add(handle);
+        void send({ kind: 'reply_handles', handles, toolUseId: message.toolUseId, droidSessionId: session.id }).catch(() => {});
+      }
       void send(message.isError
         ? { kind: 'reply', state: 'failed', code: 'reply_failed', message: 'The Amp MCP rejected the agent\'s report' }
         : sentTo === run.replyTo ? { kind: 'reply', state: 'accepted' } : { kind: 'reply', state: 'failed', code: 'reply_misrouted', message: 'The agent sent a report to a conversation other than replyTo' }).catch(() => {});
@@ -186,10 +183,27 @@ process.on('message', async (msg) => {
       } : {}),
       permissionHandler(params) {
         // Routed sessions may always report to their own recipient, even when read-only;
-        // everything else still needs autonomy high, and only ever as a single use.
-        const proceed = (run.autonomy === 'high' || (routed && isOwnPuckCall(params, run.replyTo, replyHandles))) && params.options.some((option) => option.value === ToolConfirmationOutcome.ProceedOnce);
-        void event({ type: proceed ? 'permission_approved_once' : 'permission_declined', details: JSON.stringify(params).slice(0, 4000) }).catch(() => {});
-        return proceed ? ToolConfirmationOutcome.ProceedOnce : ToolConfirmationOutcome.Cancel;
+        // read_reply always requires ownership, even at high autonomy. Other
+        // permissions retain the existing single-use high-autonomy policy.
+        const ownPuck = routed && isOwnPuckCall(params, run.replyTo, replyHandles);
+        const reads = (params.toolUses ?? []).filter(({ toolUse }) => toolUse?.name === PUCK_TOOL && toolUse.input?.action === 'read_reply');
+        const ownedReads = !reads.length || (routed && isOwnPuckCall({ toolUses: reads }, run.replyTo, replyHandles));
+        const available = params.options.some((option) => option.value === ToolConfirmationOutcome.ProceedOnce);
+        const proceed = ownedReads && (run.autonomy === 'high' || ownPuck) && available;
+        const reason = !available ? 'Single-use approval is unavailable.' : !ownedReads
+          ? 'The reply handle has no observed ownership in this session and current recipient route.' : 'The requested tool exceeds this turn\'s autonomy policy.';
+        const puckSendApprovals = proceed && routed && submissionPersisted ? (params.toolUses ?? [])
+          .filter(({ toolUse, confirmationType }) => confirmationType === 'mcp_tool' && toolUse?.name === PUCK_TOOL
+            && toolUse.input?.action === 'send' && toolUse.input?.params?.conversationID === run.replyTo
+            && typeof toolUse.id === 'string' && toolUse.id.length > 0)
+          .map(({ toolUse }) => ({ toolUseId: toolUse.id, recipient: run.replyTo })) : [];
+        for (const { toolUseId, recipient } of puckSendApprovals) approvedSends.set(toolUseId, recipient);
+        // Compact proof survives event-detail clipping. It precedes the result
+        // on this run's bound IPC channel; raw notifications cannot create it.
+        void event({ type: proceed ? 'permission_approved_once' : 'permission_declined', ...(!proceed ? { reason } : {}),
+          ...(puckSendApprovals.length ? { puckSendApprovals, droidSessionId: session.id } : {}), details: JSON.stringify(params).slice(0, 4000) }).catch(() => {});
+        // SDK 0.9.1 forwards comment on RequestPermissionResult to the CLI.
+        return proceed ? ToolConfirmationOutcome.ProceedOnce : { selectedOption: ToolConfirmationOutcome.Cancel, comment: `Controller policy: ${reason}` };
       },
       askUserHandler(params) {
         // Fail closed: never guess answers. The questions stay visible to Puck via status.
@@ -241,6 +255,7 @@ Always call the puck tool directly even in Spec mode; never call ExitSpecMode me
     // This is durable intent, NOT evidence of Factory acceptance or exactly-once
     // execution. A crash after this ACK leaves a potentially submitted turn.
     await persist(run, 'submission_intent', config.ackTimeoutMs);
+    submissionPersisted = true;
     for await (const message of session.stream(submitted)) {
       if (message.type === 'result') terminal = message;
       else {

@@ -13,8 +13,9 @@ import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { approvedWorkspace, pathsOverlap, contains } from './config.mjs';
 import { ToolError } from './errors.mjs';
-import { openStore, atomicJson, defaultTitle, resultState, legacyFingerprint, LIVE, WORKING } from './store.mjs';
+import { openStore, atomicJson, defaultTitle, resultState, legacyFingerprint, completeResult, LIVE, WORKING } from './store.mjs';
 import { sessionStatus, isWorking, resultMessages, noticeMessage, turnNotices, legacyRun } from './views.mjs';
+import { isReplyHandle, legacyReplyHandles } from './puck.mjs';
 
 const levels = ['off', 'low', 'medium', 'high'];
 const MAX_QUEUED = 64;
@@ -48,6 +49,34 @@ export class Controller {
     this.keys = new Map();
     this.bySession = new Map();
     for (const run of Object.values(this.state.runs).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))) this.index(run);
+    let backfilled = false;
+    const previous = new Map();
+    // Run records retain insertion/acceptance order. Persist route generations
+    // independently of wall-clock sorting, so detach-and-return never revives
+    // an old capability after restart or a clock adjustment.
+    for (const run of Object.values(this.state.runs)) {
+      const prior = previous.get(run.sessionId);
+      if (run.replyRouteId === undefined) {
+        run.replyRouteId = prior && prior.replyTo === run.replyTo ? prior.replyRouteId : run.runId;
+        backfilled = true;
+      }
+      previous.set(run.sessionId, run);
+    }
+    for (const run of Object.values(this.state.runs)) if (run.replyHandles === undefined) {
+      run.replyHandles = [];
+      if (run.replyTo && run.result && run.reply?.state === 'accepted') {
+        try {
+          const result = JSON.parse(readFileSync(this.store.resultPath(run.runId), 'utf8'));
+          if (completeResult(result) && result.sessionId === run.droidSessionId) run.replyHandles = legacyReplyHandles(run, result);
+        } catch (error) {
+          // Missing/corrupt old provenance cannot grant authority. Other I/O
+          // failures stop startup rather than silently losing durable ownership.
+          if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
+        }
+      }
+      backfilled = true;
+    }
+    if (backfilled) this.store.save();
   }
 
   index(run) {
@@ -56,6 +85,19 @@ export class Controller {
     this.bySession.get(run.sessionId).push(run.runId);
   }
   runsOf(sessionId) { return this.bySession.get(sessionId).map((id) => this.state.runs[id]); }
+  replyHandlesFor(run) {
+    const handles = new Set();
+    // Accepted detaches/retargets invalidate the earlier route, even if those
+    // turns were cancelled or routing later returns to the original recipient.
+    // Stop at this run: queued future routing cannot alter its authorization.
+    for (const prior of this.runsOf(run.sessionId)) {
+      if (prior.runId === run.runId) break;
+      if (prior.replyTo === run.replyTo && prior.replyRouteId === run.replyRouteId) {
+        for (const handle of prior.replyHandles) if (isReplyHandle(handle, run.replyTo)) handles.add(handle);
+      }
+    }
+    return [...handles];
+  }
   session(id) {
     if (!Object.hasOwn(this.state.sessions, id)) throw new ToolError('unknown_session', 'Unknown session handle');
     return this.state.sessions[id];
@@ -161,10 +203,12 @@ export class Controller {
       return created;
     })();
     const disposition = intent.interrupt && runs.some((run) => LIVE.has(run.state)) ? 'interrupting' : runs.some((run) => WORKING.has(run.state)) ? 'queued' : 'started';
+    const runId = randomUUID();
     const run = {
-      runId: randomUUID(), sessionId: session.sessionId, requestKey, fingerprint, workspace, autonomy, model: intent.model ?? null,
+      runId, sessionId: session.sessionId, requestKey, fingerprint, workspace, autonomy, model: intent.model ?? null,
+      replyRouteId: target && target.replyTo === replyTo ? this.run(target.headRunId).replyRouteId : runId,
       ...(reasoningEffort ? { reasoningEffort } : {}), replyTo, disposition, state: 'queued', createdAt: stamp, updatedAt: stamp,
-      droidSessionId: null, events: [], textTail: '', stderrTail: '', preview: '', cancelRequested: false,
+      droidSessionId: null, replyHandles: [], events: [], textTail: '', stderrTail: '', preview: '', cancelRequested: false,
     };
     this.state.runs[run.runId] = run;
     this.index(run);
@@ -234,7 +278,7 @@ export class Controller {
       execArgv: [],
       env: { ...process.env, FACTORY_DROID_AUTO_UPDATE_ENABLED: 'false' },
     });
-    const entry = { child, result: null, error: null, errorCode: null, reason: null, persisted: new Map() };
+    const entry = { child, result: null, error: null, errorCode: null, reason: null, persisted: new Map(), approvedReplySends: new Set() };
     this.workers.set(run.runId, entry);
     entry.timer = setTimeout(() => this.stopWorker(run, 'timeout'), this.config.runTimeoutMs);
     child.stderr.on('data', (data) => this.message(run, { kind: 'stderr', text: data.toString() }));
@@ -309,6 +353,7 @@ export class Controller {
     });
     child.send({
       run: { runId: run.runId, sessionId: run.sessionId, workspace: run.workspace, autonomy: run.autonomy, model: run.model, reasoningEffort: run.reasoningEffort, droidSessionId: run.droidSessionId, replyTo: run.replyTo },
+      replyHandles: this.replyHandlesFor(run),
       prompt,
       config: { droidPath: this.config.droidPath, approvedDirectories: this.config.approvedDirectories, reasoningEffort: this.config.reasoningEffort, amp: this.config.ampMcp ?? null, ackTimeoutMs: Math.min(this.config.runTimeoutMs, 30000) },
     });
@@ -316,8 +361,24 @@ export class Controller {
 
   message(run, msg) {
     if (msg.kind === 'stderr') run.stderrTail = (run.stderrTail + msg.text).slice(-16000);
-    else if (msg.kind === 'event') {
-      if (msg.event.type === 'permission_declined') run.permissionsDeclined = (run.permissionsDeclined ?? 0) + 1;
+    else if (msg.kind === 'reply_handles') {
+      const entry = this.workers.get(run.runId);
+      if (!run.droidSessionId || msg.droidSessionId !== run.droidSessionId
+        || !Array.isArray(msg.handles) || !msg.handles.every((handle) => isReplyHandle(handle, run.replyTo))
+        || !entry?.approvedReplySends.delete(msg.toolUseId)) return;
+      for (const handle of msg.handles) if (!run.replyHandles.includes(handle)) run.replyHandles.push(handle);
+      if (msg.handles.length) this.changed(run); // Ownership and its approval proof are durable before inheritance.
+      return;
+    } else if (msg.kind === 'event') {
+      if (msg.event.type === 'permission_approved_once' && msg.event.droidSessionId === run.droidSessionId) {
+        const entry = this.workers.get(run.runId);
+        if (entry?.persisted.has('submission_intent')) for (const approval of msg.event.puckSendApprovals ?? []) {
+          if (approval.recipient === run.replyTo && typeof approval.toolUseId === 'string' && approval.toolUseId.length > 0) entry.approvedReplySends.add(approval.toolUseId);
+        }
+      } else if (msg.event.type === 'permission_declined') {
+        run.permissionsDeclined = (run.permissionsDeclined ?? 0) + 1;
+        if (msg.event.reason) run.permissionDenials = [...new Set([...(run.permissionDenials ?? []), msg.event.reason])];
+      }
       run.events.push({ at: now(), ...msg.event });
       run.events = run.events.slice(-20);
       if (msg.event.type === 'assistant' && typeof msg.event.text === 'string') {
