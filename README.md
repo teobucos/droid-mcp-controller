@@ -111,22 +111,22 @@ it), `failed` (rejected, or sent to a conversation other than `replyTo`,
 `reply_misrouted`), `not_sent` (the turn ended without a report). A failed
 notification never turns a finished run into a failed run.
 
-### Deprecated aliases
+### Breaking change: session API only
 
 `droid_start`, `droid_continue`, `droid_status`, `droid_result`, `droid_list` and
-`droid_cancel` remain as thin views over the same core with their original
-run-shaped outputs and string errors. Differences from before: `droid_start`
-without `puckConversationId` is **detached** (no host default recipient exists),
-conflicting work now queues instead of failing with `workspace_busy` or at capacity,
-and `droid_continue` still refuses a busy session instead of queueing. Models are
-not catalog-validated on the aliases. Migrate to the session tools; the aliases
-carry no logic of their own.
+`droid_cancel` are removed, not hidden. The catalog contains exactly 11 tools.
+Old names fail at dispatch; there are no aliases or compatibility flags.
+Callers must use session handles with create/send/status/read/find/cancel session
+tools, explicitly select a current model, and supply `replyTo` on creation.
+Refresh cached MCP catalogs. `droid_models` is unchanged. Internal run IDs remain
+turn identifiers, not a second API. The repository's smoke/acceptance drivers use
+the session API; external clients that imported the removed names must change.
 
 ## Models come from the live authenticated runtime
 
 `droid_models` initializes a short-lived Droid connection with the same CLI, service
 user, HOME and `FACTORY_HOME_OVERRIDE` as normal runs, captures the live
-`availableModels`/`available_models`, closes the session, and never submits a prompt
+`availableModels`, closes the session, and never submits a prompt
 or approves a tool. Create and send validate `model` and `reasoningEffort` against
 that catalog and reject with `model_unavailable` / `reasoning_unsupported`. Entries
 with `disabled:true` or `deprecated:true` are omitted; optional metadata is returned
@@ -269,13 +269,12 @@ not a replay. Assistant echoes, permission context, stderr and final results can
 still contain sensitive text; Factory's own session history is separate and
 may retain prompts. Fingerprints are not encryption.
 
-State is versioned. Version 3 (current) has `sessions` (title, labels, archive flag,
-`replyTo`, workspace, authoritative `headRunId`) and `runs`. Older state migrates
-atomically at startup after validation, **keeping a byte-identical backup**
-(`state.json.v1.bak` or `state.json.v2.bak`, never overwritten); invalid or
-inconsistent state refuses to start without being rewritten. See
-[docs/STATE-MIGRATION.md](docs/STATE-MIGRATION.md) for the exact mapping and recovery.
-Original prompts are never in state or in migrated backups' successors.
+Only current version 3 state is supported: `sessions` (title, labels, archive flag,
+`replyTo`, workspace, authoritative `headRunId`) and `runs`, including durable
+`replyHandles` and `replyRouteId`. Older formats and incomplete records refuse
+startup without rewriting. There are no automatic migrations or backfills.
+Existing current sessions, results, request keys and credentials are preserved.
+See [docs/STATE-MIGRATION.md](docs/STATE-MIGRATION.md) for requirements and recovery.
 
 ## Configuration and security
 
@@ -369,22 +368,22 @@ Terminal matching is `agent_turn_completed.turnId == add_user_message.messageId`
 idle, assistant text, silence, unrelated turn IDs and process exit cannot succeed.
 
 `npm test` drives the real MCP SDK client, controller, worker, Factory SDK and a
-mock JSON-RPC peer (`test/e2e.test.mjs` for the legacy aliases and safeguards,
+mock JSON-RPC peer (`test/e2e.test.mjs` for transport, SDK and persistence safeguards,
 `test/session-surface.test.mjs` for the session tools). It covers the strict
 schemas and errors, idempotency, steering and queueing, N parallel sessions,
 capacity queueing, overlapping-workspace serialization (both lock directions,
 symlinks, FIFO fairness), mixed autonomy, concurrent reply-back with per-session
 recipients, misroute detection, cancel/steer isolation, Amp MCP preflight failures,
-v1/v2 migration with backup, crash fail-closed and queue loss. See `test/README.md`.
+removed-tool rejection, unsupported-state refusal, crash fail-closed and queue loss. See `test/README.md`.
 `test/review-regressions.test.mjs` and `test/worker-ack.test.mjs` additionally test
 durable queue supersession, persistence ACK fault boundaries, per-run reply handles,
-failed-predecessor attention, catalog lifecycle and migrated request-key retries.
+failed-predecessor attention and catalog lifecycle.
 `npm run smoke` runs a two-turn lifecycle against a real CLI, and
 `scripts/acceptance.mjs` is the live acceptance driver for a **second** instance
 (own port, token and state directory), never the production service.
 
 For bounded authenticated read-only verification with disposable private state:
-`node scripts/verify-live.mjs --droid /absolute/path/to/droid --model CURRENT_ID`.
+`node scripts/verify-live.mjs --droid /absolute/path/to/droid --model CURRENT_ID --workspace /approved/smoke/root`.
 It checks real SDK acceptance, two exact results, same-UUID continuation and
 cancellation of a third turn, then process cleanup; output contains only assertions
 and versions, not prompts, session UUIDs or credentials. Pick an economical current

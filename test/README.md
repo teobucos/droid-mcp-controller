@@ -10,7 +10,7 @@ against a mock `droid exec` executable. It must distinguish these failures:
 - Two continuations overlap or reuse a different session UUID. Settings inherited
   from a saved session silently override requested autonomy/model.
 - Per-turn reasoning is ignored on start/resume; changing it reuses a key;
-  changing host defaults after restart breaks replay of an accepted legacy key.
+  changing host defaults after restart breaks replay of an accepted session key.
 - An explicitly configured high default remains Spec/off or cannot approve an
   offered single-use permission; an explicit off override inherits high instead.
   High silently creates persistent permission rules or invents unavailable options.
@@ -34,12 +34,10 @@ against a mock `droid exec` executable. It must distinguish these failures:
 
 Before implementation, extend protocol E2E to distinguish:
 
-- A stale ancestor continues after a successor, failure, restart or v1 migration;
-  two simultaneous continuations both launch; an unknown descendant is bypassed.
-  A v2 authoritative head is ignored or a missing/wrong-family head is repaired
-  silently. V1 acceptance timestamps, not insertion order or parent edges, choose
-  the migrated head; malformed timestamps must refuse startup.
-- Original prompt text remains in accepted/completed/migrated state, or removing
+- Two simultaneous turns on one session launch; an unknown outcome is bypassed.
+  An authoritative head is ignored or missing/wrong-session state is repaired silently.
+  Unsupported versions or missing durable ownership fields must refuse startup.
+- Original prompt text remains in accepted/completed state, or removing
   it breaks fingerprint-based replay with changed defaults after restart. Use a
   unique non-echoed marker; separately permit assistant echoes as result data.
   SDK user-message copies in new result files are original input, not assistant
@@ -50,7 +48,7 @@ Before implementation, extend protocol E2E to distinguish:
   Global concurrency still bounds readers and distinct workspace writers.
 - Discovery is missing, caches per HTTP request instead of per controller, starts
   duplicate simultaneous probes, returns disabled/historical models, fabricates
-  optional metadata, ignores snake-case catalogs, or keeps an expired catalog
+  optional metadata, or keeps an expired catalog
   after a failed refresh. A discovery process submits a prompt, authorizes tools,
   hangs without cleanup, omits the SDK-required machineId, or needs FACTORY_API_KEY.
   Mock audit proves init/close without a turn and dead child PIDs; catalog changes
@@ -82,8 +80,9 @@ plausible wrong implementation:
   unsupported reasoning; errors lack `code/retryable/action` or leak private paths; rejected
   creates leave a session behind.
 - A Factory UUID, fingerprint, stderr or prompt text appears in a session tool output.
-- Replays create a second session; a changed intent with the same key is accepted; the
-  deprecated `droid_start` replay returns the session head instead of its own run.
+- Replays create a second session or a changed intent with the same key is accepted.
+- The catalog contains anything besides the 11 current tools; a removed name remains
+  callable with formerly valid arguments or changes state despite being unadvertised.
 - Default send interrupts, or `interrupt:true` submits the new turn before the interrupt and
   cleanup, or two turns share a Droid process; cancel leaves queued follow-ups that later run.
 - Capacity is 1 or unbounded; at capacity work is rejected or submitted early; four sessions run
@@ -100,8 +99,8 @@ plausible wrong implementation:
 - Preflight failures (archived, unauthenticated, tool missing, admin exposed, server dropped
   from the listing) surface as the masked `Unknown tool identifier(s)` or submit the prompt.
 - A read-only routed session cannot report, or any other permission is approved at a low level.
-- v2 state migrates without a byte-identical backup, retargets recorded recipients, or loses
-  heads and unknown outcomes; a crash replays work, loses `unknown`, or starts queued turns.
+- Current state loses heads, recipients or unknown outcomes; a crash replays work,
+  loses `unknown`, or starts queued turns. Unsupported state is rewritten on refusal.
 - `docs/TOOLS.md` drifts from the registered schemas (`npm run check`).
 
 Live acceptance on a second instance: `scripts/acceptance.mjs`.
@@ -109,10 +108,9 @@ Live acceptance on a second instance: `scripts/acceptance.mjs`.
 Expected outcomes are independently asserted, including exact final text and
 UUIDs, request settings in a mock wire audit, and real process exit/restart.
 `npm test` emits TAP, suitable for a repeatable handoff artifact.
-To retain the sanitized two-turn **mock**, not live-host, smoke artifact too:
+To retain repeatable **mock**, not live-host, evidence:
 
 ```sh
 mkdir -p .amp/in/artifacts
-DROID_E2E_ARTIFACT="$PWD/.amp/in/artifacts/mock-smoke.json" npm test \
-  > .amp/in/artifacts/e2e.tap 2>&1
+npm test > .amp/in/artifacts/e2e.tap 2>&1
 ```

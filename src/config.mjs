@@ -6,7 +6,6 @@ import { ToolError } from './errors.mjs';
 export const autonomy = z.enum(['off', 'low', 'medium', 'high']);
 export const reasoning = z.enum(['off', 'none', 'dynamic', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
 export const AMP_MCP_URL = 'https://ampcode.com/mcp?profile=external-agent';
-export const conversationId = z.string().regex(/^T-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 const absolute = z.string().refine(isAbsolute, 'Use an absolute path (expand ~ yourself)');
 const schema = z.object({
   approvedDirectories: z.array(absolute).min(1),
@@ -38,9 +37,6 @@ const schema = z.object({
 export function loadConfig(path) {
   if (!['linux', 'darwin'].includes(process.platform)) throw new Error('Linux or macOS required for process-group cleanup');
   const raw = JSON.parse(readFileSync(path, 'utf8'));
-  if (raw && typeof raw === 'object' && 'puck' in raw) {
-    throw new Error('Config key "puck" was removed: a host default recipient and thread-bound endpoint misroute work. Use {"ampMcp": {}} for reply-back; pass replyTo per session.');
-  }
   const config = schema.parse(raw);
   config.approvedDirectories = config.approvedDirectories.map((p) => {
     const dir = realpathSync(p);

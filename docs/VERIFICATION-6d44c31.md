@@ -1,5 +1,9 @@
 # Delayed Puck reply ownership verification
 
+Historical evidence for the linked revision, not the current API contract.
+The six run tools and ownership backfill described below have since been removed.
+See TOOLS.md and CUTOVER.md for current behavior.
+
 Date: 2026-10-09 UTC. Fixed source:
 [`6d44c313f0306665bf26c08f80c3b5fcb507ffed`](https://github.com/teobucos/droid-mcp-controller/commit/6d44c313f0306665bf26c08f80c3b5fcb507ffed).
 Base/deployed source at reproduction:

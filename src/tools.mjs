@@ -1,8 +1,7 @@
-// The tool surface: eleven tools named and shaped like Puck's Amp thread tools,
-// plus six thin deprecated aliases over the same controller methods. This file is
-// the single source for schemas and descriptions; docs/TOOLS.md is generated from it.
+// Eleven session tools. This is the single source for schemas and descriptions;
+// docs/TOOLS.md is generated from it.
 import { z } from 'zod';
-import { autonomy, reasoning, conversationId } from './config.mjs';
+import { autonomy, reasoning } from './config.mjs';
 import { RUN_STATES } from './store.mjs';
 
 const nonBlank = /\S/;
@@ -42,15 +41,8 @@ const dispositionShape = z.enum(['started', 'queued', 'interrupting']);
 const messageShape = z.object({ id: z.string(), runId: z.string(), role: z.enum(['assistant', 'tool', 'controller']), type: z.enum(['message', 'tool_call', 'tool_result', 'error', 'notice']), text: z.string(), truncated: z.boolean() });
 const tokens = z.object({ inputTokens: z.number(), outputTokens: z.number(), cacheReadTokens: z.number(), cacheCreationTokens: z.number(), thinkingTokens: z.number() });
 
-export function defineTools(controller, models, config) {
-  const policy = `Approved workspace roots: ${JSON.stringify(config.approvedDirectories)}. Autonomy ceiling: ${config.maxAutonomy}. Default autonomy: ${config.defaultAutonomy}. Host reasoning effort: ${config.reasoningEffort ?? 'Droid default'}. Call droid_models and pass a current model id explicitly.`;
+export function defineTools(controller, models) {
   const tool = (name, description, input, output, run, readOnly = false) => ({ name, description, input, output, run, readOnly });
-  const alias = (name, description, input, run, readOnly = false) => ({ name, description: `Deprecated: use the droid_*_session tools. ${description}`, input, run, readOnly, legacy: true });
-  const legacyOptions = {
-    autonomy: settings.autonomy, model: model.optional(), reasoningEffort: settings.reasoningEffort,
-    puckConversationId: z.string().regex(/^T-[0-9a-f-]{36}$/).optional().describe('Explicit recipient; omitted means detached for a new run and "keep the session recipient" for a continuation.'),
-  };
-  const runId = z.string().uuid().describe('Controller run UUID, not a Droid session UUID');
 
   return [
     tool('droid_create_session',
@@ -143,16 +135,5 @@ export function defineTools(controller, models, config) {
       z.object({}).strict(),
       z.object({ fetchedAt: z.string(), models: z.array(z.object({ id: z.string(), displayName: z.string(), deprecated: z.boolean().optional(), provider: z.string().optional(), supportedReasoningEfforts: z.array(z.string()).optional(), defaultReasoningEffort: z.string().optional(), supportsImages: z.boolean().optional(), supportsPdfs: z.boolean().optional() })) }),
       () => models.get(), true),
-
-    // ---- deprecated aliases: same controller methods, old names and shapes ----
-    alias('droid_start', `Start a durable asynchronous Droid task (a one-turn view of droid_create_session). Detached unless puckConversationId is explicit. ${policy}`,
-      z.object({ requestKey, prompt: text, workspace: z.string().min(1), ...legacyOptions }),
-      ({ puckConversationId, ...args }) => controller.legacyStart({ ...args, replyTo: puckConversationId ?? null })),
-    alias('droid_continue', `Continue only the current head run of a session without queueing (droid_send_message). Returns a NEW runId. ${policy}`,
-      z.object({ runId, requestKey, prompt: text, ...legacyOptions }), (args) => controller.legacyContinue(args)),
-    alias('droid_status', 'Run state, events, partial text and stderr for one run (droid_get_session_status).', z.object({ runId }), ({ runId: id }) => controller.legacyStatus(id), true),
-    alias('droid_result', 'Paginated final text and outcome for one run (droid_read_session).', z.object({ runId, offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(16000).default(12000) }), (args) => controller.legacyResult(args), true),
-    alias('droid_list', 'List runs, newest first (droid_find_sessions).', z.object({ offset: z.number().int().min(0).default(0), limit: z.number().int().min(1).max(100).default(25) }), (args) => controller.legacyList(args), true),
-    alias('droid_cancel', 'Cancel one run (droid_cancel_session).', z.object({ runId }), ({ runId: id }) => controller.legacyCancel(id)),
   ];
 }

@@ -39,11 +39,9 @@ workers it spawns, and the Droid to Puck reply path. Same host, same service use
   are denied even at autonomy `high`. Other permissions retain the existing
   single-use high-autonomy policy. Policy declines carry a controller reason in
   the permission response and retained history; SDK success is not task acceptance.
-- **Legacy ownership backfill.** Old prompt-free records require an originating
-  run's approved send tool-use ID and corresponding non-error SDK call/result,
-  matching that run's Factory UUID and explicit recipient. Assistant prose,
-  copied historical tool results, missing/truncated approvals and corrupt/missing
-  result files cannot grant ownership. Runs with insufficient proof remain denied.
+- **No ownership inference.** Current state must contain durable reply handles and
+  route generations. Missing ownership fields refuse startup; historical transcripts
+  and permission events are never converted into new capabilities.
 - **Observed, not claimed, reporting.** `notification` records what the worker saw the
   agent's tool call do. A report to another conversation is `reply_misrouted`;
   acceptance is never described as delivery.

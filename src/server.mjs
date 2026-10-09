@@ -26,7 +26,7 @@ async function main() {
   };
   process.on('SIGTERM', shutdown); process.on('SIGINT', shutdown);
   if (config.transport === 'stdio') {
-    mcp = createMcp(controller, models, config);
+    mcp = createMcp(controller, models);
     await mcp.connect(new StdioServerTransport());
     process.stdin.on('end', shutdown);
     return;
@@ -56,7 +56,7 @@ async function main() {
       catch { return fail(400, 'Invalid MCP request'); }
       const messages = Array.isArray(body) ? body : [body];
       if (!messages.length || messages.some((message) => !JSONRPCMessageSchema.safeParse(message).success)) return fail(400, 'Invalid MCP request');
-      const server = createMcp(controller, models, config);
+      const server = createMcp(controller, models);
       // Use the public Web Standard transport so an SDK-internal failure can be
       // classified/sanitized BEFORE its HTTP response reaches the client.
       const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });

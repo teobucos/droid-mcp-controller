@@ -5,7 +5,6 @@ const ACTIONS = {
   invalid_argument: ['Fix the arguments and call the tool again; the message names the offending field.', false],
   invalid_cursor: ['Restart pagination without a cursor, or pass the nextCursor returned by the previous page unchanged.', false],
   unknown_session: ['Use a session handle returned by droid_create_session or droid_find_sessions.', false],
-  unknown_run: ['Use a runId returned by a deprecated droid_* tool or by latestRun.runId.', false],
   request_key_conflict: ['Reuse a requestKey only with identical arguments; pick a new requestKey for new work.', false],
   workspace_not_approved: ['Call droid_list_workspaces and choose a directory inside one of the returned roots.', false],
   autonomy_exceeds_ceiling: ['Request an autonomy level at or below policy.maxAutonomy (see droid_list_workspaces).', false],
@@ -15,7 +14,6 @@ const ACTIONS = {
   reply_back_unavailable: ['Use replyTo:null for detached work, or ask the operator to configure ampMcp on the controller host.', false],
   session_busy: ['Wait for the session to settle (droid_wait_for_sessions) or cancel it first.', true],
   session_unknown_outcome: ['The controller stopped mid-turn, so the result is unknown. Inspect the workspace and history locally; nothing was replayed. Start a new session to continue the work.', false],
-  not_session_head: ['Continue from the current head run named by headRunId.', false],
   queue_full: ['Too much work is queued. Wait for sessions to settle (droid_wait_for_sessions) and retry.', true],
   shutting_down: ['The controller is stopping; retry after it restarts.', true],
   internal_error: ['Retry once; if it persists report it to the controller operator (details are in the controller log).', true],
@@ -38,10 +36,9 @@ const ACTIONS = {
 };
 
 export class ToolError extends Error {
-  constructor(code, message, extra = {}) {
+  constructor(code, message) {
     super(message);
     this.code = code;
-    this.extra = extra;
   }
 }
 
@@ -50,16 +47,13 @@ export function describeError(code, message) {
   return { code, message, retryable, action };
 }
 
-// Fields legacy clients already rely on, next to the code.
-const SIDE_FIELDS = ['headRunId', 'conflictingRunId', 'workspace'];
-export function toolFailure(error, { legacy = false } = {}) {
+export function toolFailure(error) {
   let toolError = error;
   if (!(error instanceof ToolError)) {
     console.error('Unexpected controller error:', error);
     toolError = new ToolError('internal_error', 'Unexpected controller error');
   }
   const body = describeError(toolError.code, toolError.message);
-  const side = Object.fromEntries(SIDE_FIELDS.filter((key) => toolError.extra[key] !== undefined).map((key) => [key, toolError.extra[key]]));
-  const payload = legacy ? { error: body.message, code: body.code, ...side } : { error: { ...body, ...side } };
+  const payload = { error: body };
   return { isError: true, content: [{ type: 'text', text: JSON.stringify(payload) }] };
 }

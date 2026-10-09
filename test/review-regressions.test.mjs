@@ -5,7 +5,6 @@ import assert from 'node:assert/strict';
 import { rmSync, writeFileSync, readFileSync, existsSync, mkdtempSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createHash } from 'node:crypto';
 import { boot, stop, call, audit, readState, writeCatalog, sleep, processRunning, root } from './harness.mjs';
 
 async function fixture(t, config = {}, env = {}) {
@@ -84,7 +83,7 @@ for (const failure of ['death', 'timeout']) test(`R4: ${failure} predecessor rem
   assert.equal(resolved.latestRun.predecessorFailure, null);
 });
 
-test('compatibility: omitted default autonomy respects an explicit off ceiling', async (t) => {
+test('policy: omitted default autonomy respects an explicit off ceiling', async (t) => {
   const h = await fixture(t, { maxAutonomy: 'off', defaultAutonomy: undefined });
   const policy = (await call(h, 'droid_list_workspaces', {})).policy;
   assert.equal(policy.defaultAutonomy, 'off');
@@ -228,35 +227,6 @@ test('delayed reply: ownership excludes foreign sessions, bad handles and detach
   } finally { await stop(again); }
 });
 
-for (const proof of ['valid', 'no-approval', 'truncated-approval', 'foreign-uuid', 'failed-result', 'wrong-tool-id', 'quoted-only']) {
-  test(`delayed reply: prompt-free old v3 restore requires correlated observed provenance (${proof})`, async (t) => {
-    const h = await fixture(t, { ampMcp: {} });
-    const a = await h.create('old-v3', 'base'); const session = a.metadata.session; await h.settle(session);
-    const sent = await h.send(session, 'old-send', 'puck-handle:valid', { replyTo: 'T-11111111-1111-4111-8111-111111111111' }); await h.settle(session);
-    const handle = await sentHandle(h, session);
-    await stop(h);
-    const state = readState(h); const run = state.runs[sent.runId]; delete run.replyHandles;
-    const path = join(h.dir, 'state', `${sent.runId}.result.json`);
-    const result = JSON.parse(readFileSync(path, 'utf8'));
-    const approval = run.events.find((e) => e.type === 'permission_approved_once' && e.details.includes('"action":"send"'));
-    const returned = result.messages.find((m) => m.type === 'tool_result' && typeof m.content === 'string' && m.content.startsWith('{"status":"queued"'));
-    if (proof === 'no-approval') run.events = [];
-    if (proof === 'truncated-approval') approval.details = approval.details.slice(0, -4);
-    if (proof === 'foreign-uuid') result.sessionId = '99999999-9999-4999-8999-999999999999';
-    if (proof === 'failed-result') returned.isError = true;
-    if (proof === 'wrong-tool-id') returned.toolUseId = 'unobserved-send-id';
-    if (proof === 'quoted-only') result.messages = [{ type: 'assistant', text: returned.content }];
-    writeFileSync(join(h.dir, 'state/state.json'), JSON.stringify(state)); writeFileSync(path, JSON.stringify(result));
-    const again = await boot({ ampMcp: {} }, {}, h.dir);
-    try {
-      await call(again, 'droid_send_message', { session, requestKey: 'old-delayed-read', message: `puck-read:${handle}`, model: 'mock-model', autonomy: 'off' });
-      const status = (await call(again, 'droid_wait_for_sessions', { sessions: [session], timeoutSeconds: 15 })).sessions[0];
-      assert.equal(status.latestRun.permissionsDeclined, proof === 'valid' ? 0 : 1);
-      assert.equal(status.preview.text === 'DELAYED_ACK', proof === 'valid');
-    } finally { await stop(again); }
-  });
-}
-
 for (const unrelated of [false, true]) test(`catalog: verified lifecycle metadata, initialization correlation (unrelated=${unrelated})`, async (t) => {
   const h = await fixture(t, {}, unrelated ? { MOCK_CATALOG_UNRELATED: '1' } : {});
   writeCatalog(h, [
@@ -271,82 +241,6 @@ for (const unrelated of [false, true]) test(`catalog: verified lifecycle metadat
     { id: 'unknown-lifecycle', displayName: 'Z sparse' },
   ]);
   assert.deepEqual(audit(h).map((x) => x.method), ['droid.initialize_session', 'droid.close_session']);
-});
-
-for (const [version, format] of [[1, '98e0e7'], [2, '98e0e7'], [3, '98e0e7'], [1, '7b4a816'], [2, '7b4a816']]) test(`migration v${version} (${format}): fingerprint retries preserve outcome and never submit again`, async (t) => {
-  const h = await fixture(t);
-  const prompt = 'no-echo:LEGACY_PRIVATE_PROMPT';
-  const puckConversationId = format === '7b4a816' && version === 2 ? 'T-11111111-1111-4111-8111-111111111111' : undefined;
-  const a = await h.create('legacy-key', prompt); await h.settle(a.metadata.session);
-  const b = await h.send(a.metadata.session, 'legacy-followup', `${prompt}-followup`); await h.settle(a.metadata.session);
-  await stop(h);
-  const good = readState(h);
-  const runs = [a.latestRun.runId, b.runId].map((runId, index) => {
-    const old = { ...good.runs[runId], parentRunId: index ? a.latestRun.runId : null };
-    if (version !== 3) for (const key of ['sessionId', 'replyTo', 'disposition', 'preview', 'submissionIntentAt']) delete old[key];
-    if (puckConversationId) old.puckConversationId = puckConversationId;
-    const input = index ? `${prompt}-followup` : prompt;
-    // Independent historical serializers: 98e0e7 stored host reasoning on the
-    // run, OUTSIDE this five-field hash; 7b4a816 added reasoning and routing.
-    assert.equal(old.reasoningEffort, 'high');
-    old.fingerprint = createHash('sha256').update(JSON.stringify({ workspace: old.workspace, prompt: input, autonomy: old.autonomy, model: old.model, parentRunId: old.parentRunId, ...(format === '7b4a816' ? { reasoningEffort: old.reasoningEffort, ...(puckConversationId ? { puckConversationId } : {}) } : {}) })).digest('hex');
-    if (version === 1) old.prompt = input;
-    if (version === 3) old.fingerprintVersion = 2; // Already migrated by ee240db; no raw prompt remains.
-    return old;
-  });
-  const [old, followup] = runs;
-  const legacy = { version, host: good.host, home: good.home, factoryHomeOverride: good.factoryHomeOverride, runs: Object.fromEntries(runs.map((run) => [run.runId, run])), ...(version === 2 ? { sessionHeads: { [old.droidSessionId]: followup.runId } } : version === 3 ? { nextSeq: good.nextSeq, sessions: good.sessions } : {}) };
-  const bytes = JSON.stringify(legacy);
-  writeFileSync(join(h.dir, 'state/state.json'), bytes);
-  const again = await boot({}, {}, h.dir);
-  try {
-    if (version !== 3) assert.equal(readFileSync(join(h.dir, `state/state.json.v${version}.bak`), 'utf8'), bytes);
-    const count = audit(again).filter((x) => x.method === 'droid.add_user_message').length;
-    const migratedBytes = readFileSync(join(h.dir, 'state/state.json'), 'utf8');
-    const startArgs = { requestKey: 'legacy-key', prompt, workspace: old.workspace, model: old.model, ...(puckConversationId ? { puckConversationId } : {}) };
-    const continueArgs = { runId: old.runId, requestKey: 'legacy-followup', prompt: `${prompt}-followup`, model: old.model };
-    await t.test('same-key start returns original outcome', async () => {
-      const replay = await call(again, 'droid_start', startArgs);
-      assert.equal(replay.runId, old.runId); assert.equal(replay.state, 'succeeded');
-      assert.equal((await call(again, 'droid_start', startArgs)).runId, old.runId);
-    });
-    if (puckConversationId) await assert.rejects(call(again, 'droid_start', { requestKey: 'legacy-key', prompt, workspace: old.workspace, model: old.model }), (e) => e.code === 'request_key_conflict');
-    await t.test('same-key continue returns original outcome', async () => {
-      const resumed = await call(again, 'droid_continue', continueArgs);
-      assert.equal(resumed.runId, followup.runId);
-      assert.equal((await call(again, 'droid_continue', continueArgs)).runId, followup.runId);
-    });
-    assert.equal(Object.values(readState(again).sessions)[0].headRunId, followup.runId);
-    const conflict = (name, args) => assert.rejects(call(again, name, args), (e) => e.code === 'request_key_conflict');
-    if (format === '98e0e7') {
-      // Even the same effective host setting is a NEW per-turn option that the
-      // first API never supported, so the five-field fallback may not erase it.
-      await conflict('droid_start', { ...startArgs, reasoningEffort: 'high' });
-      await conflict('droid_continue', { ...continueArgs, reasoningEffort: 'high' });
-    }
-    for (const change of [{ prompt: 'different' }, { model: 'different-model' }, { workspace: join(old.workspace, 'different-workspace') }, { autonomy: 'high' }, { reasoningEffort: 'low' }, { puckConversationId: 'T-22222222-2222-4222-8222-222222222222' }]) {
-      if (change.workspace) {
-        // Existing canonical, approved alternate workspace: exercise the hash,
-        // not the unrelated path-not-found rejection.
-        mkdirSync(change.workspace);
-      }
-      await conflict('droid_start', { ...startArgs, ...change });
-      if (!change.workspace) await conflict('droid_continue', { ...continueArgs, ...change });
-    }
-    await conflict('droid_start', { ...startArgs, requestKey: continueArgs.requestKey, prompt: continueArgs.prompt });
-    await conflict('droid_continue', { ...continueArgs, runId: followup.runId });
-    const session = Object.keys(readState(again).sessions)[0];
-    for (const extra of [{ reasoningEffort: 'low' }, { title: 'new-title' }, { labels: ['new-label'] }, { replyTo: 'T-22222222-2222-4222-8222-222222222222' }]) {
-      await conflict('droid_create_session', { requestKey: 'legacy-key', prompt, workspace: old.workspace, model: old.model, replyTo: puckConversationId ?? null, ...extra });
-    }
-    await conflict('droid_send_message', { session, requestKey: continueArgs.requestKey, message: continueArgs.prompt, model: old.model, interrupt: true });
-    await conflict('droid_send_message', { session, requestKey: continueArgs.requestKey, message: continueArgs.prompt, model: old.model, replyTo: null });
-    assert.equal(audit(again).filter((x) => x.method === 'droid.add_user_message').length, count);
-    assert.equal(readFileSync(join(h.dir, 'state/state.json'), 'utf8'), migratedBytes);
-    t.diagnostic('Retry/conflict calls: zero additional SDK submissions; migrated state remains byte-identical.');
-    assert.ok(!readFileSync(join(h.dir, 'state/state.json'), 'utf8').includes(prompt));
-    assert.ok(!readFileSync(join(h.dir, 'state', `${old.runId}.result.json`), 'utf8').includes(prompt));
-  } finally { await stop(again); }
 });
 
 for (const phase of ['session', 'submission_intent']) for (const mode of ['delay', 'fail']) test(`R2: real controller ${phase} directory fsync ${mode} gates SDK submission`, async (t) => {

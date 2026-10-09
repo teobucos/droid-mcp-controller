@@ -4,8 +4,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { mkdirSync, symlinkSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync, chmodSync } from 'node:fs';
-import { hostname, homedir, tmpdir } from 'node:os';
+import { mkdirSync, symlinkSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { request as httpRequest } from 'node:http';
@@ -21,7 +21,7 @@ const CATALOG = [
   { id: 'model-b', displayName: 'B' },
 ];
 const NEW_TOOLS = ['droid_create_session', 'droid_send_message', 'droid_get_session_status', 'droid_read_session', 'droid_wait_for_sessions', 'droid_find_sessions', 'droid_update_session', 'droid_cancel_session', 'droid_get_usage', 'droid_list_workspaces', 'droid_models'];
-const ALIASES = ['droid_start', 'droid_continue', 'droid_status', 'droid_result', 'droid_list', 'droid_cancel'];
+const REMOVED_TOOLS = ['droid_start', 'droid_continue', 'droid_status', 'droid_result', 'droid_list', 'droid_cancel'];
 
 async function fixture(extra = {}, env = {}, existing) {
   return decorate(await boot(extra, env, existing));
@@ -52,20 +52,18 @@ function decorate(h) {
 const done = async (h) => { await stop(h); rmSync(h.dir, { recursive: true, force: true }); };
 const rejectsWith = (promise, code) => assert.rejects(promise, (error) => { assert.equal(error.code, code, error.message); return true; });
 
-test('surface: eleven strict tools plus six thin deprecated aliases, polished errors', async (t) => {
+test('surface: exactly eleven strict tools, removed names are not callable, polished errors', async (t) => {
   const h = await fixture({ maxAutonomy: 'medium' });
   t.after(() => done(h));
   const tools = (await h.client.listTools()).tools;
-  await t.test('exact tool inventory, strict object schemas, deprecated aliases labelled', () => {
-    // droid_models is both a new tool and a legacy name: 11 + 6 aliases = 17.
-    assert.deepEqual(tools.map((x) => x.name).sort(), [...NEW_TOOLS, ...ALIASES].sort());
+  await t.test('exact tool inventory, strict object schemas', () => {
+    assert.deepEqual(tools.map((x) => x.name).sort(), NEW_TOOLS.toSorted());
     for (const name of NEW_TOOLS) {
       const tool = tools.find((x) => x.name === name);
       assert.equal(tool.inputSchema.type, 'object', name);
       assert.equal(tool.inputSchema.additionalProperties, false, `${name} must reject unknown arguments`);
       assert.ok(tool.description.length > 150 && /Example/.test(tool.description), `${name} needs a real description with an example`);
     }
-    for (const name of ALIASES) assert.match(tools.find((x) => x.name === name).description, /^Deprecated/, name);
     for (const name of ['droid_get_session_status', 'droid_read_session', 'droid_wait_for_sessions', 'droid_find_sessions', 'droid_get_usage', 'droid_list_workspaces', 'droid_models']) {
       assert.equal(tools.find((x) => x.name === name).annotations.readOnlyHint, true, name);
     }
@@ -73,6 +71,24 @@ test('surface: eleven strict tools plus six thin deprecated aliases, polished er
     assert.ok(create.inputSchema.required.includes('replyTo') && create.inputSchema.required.includes('model'));
     assert.match(tools.find((x) => x.name === 'droid_send_message').description, /interrupt:\s*true/);
     assert.match(tools.find((x) => x.name === 'droid_send_message').description, /not Amp's|does not interrupt by default|default.*interrupt:\s*false/i);
+  });
+
+  await t.test('removed tools fail at dispatch even with formerly valid arguments', async () => {
+    const created = await h.create('removal-fixture', 'normal');
+    await h.settle([created.metadata.session]);
+    const args = [
+      { requestKey: 'removed-create', workspace: h.ws(), prompt: 'must not run' },
+      { runId: created.latestRun.runId, requestKey: 'removed-send', prompt: 'must not run' },
+      { runId: created.latestRun.runId }, { runId: created.latestRun.runId }, {}, { runId: created.latestRun.runId },
+    ];
+    const before = readState(h);
+    for (const [i, name] of REMOVED_TOOLS.entries()) {
+      const result = await h.client.callTool({ name, arguments: args[i] });
+      assert.equal(result.isError, true, name);
+      assert.match(result.content[0].text, /not found/i, name);
+    }
+    assert.deepEqual(readState(h), before, 'removed calls cannot change durable state');
+    await call(h, 'droid_update_session', { session: created.metadata.session, archived: true });
   });
 
   await t.test('invalid input fails with an actionable structured error and no leaked internals', async () => {
@@ -564,14 +580,14 @@ test('preflight: actionable Amp MCP failures replace the masked unknown-tool err
 });
 
 test('configuration: no default recipient, no thread-bound endpoint, capacity bounds', async () => {
-  const legacy = [
+  const invalid = [
     [{ puck: { conversationId: PUCK } }, /puck|ampMcp/i],
     [{ ampMcp: { url: `${AMP_URL}&threadID=${PUCK}` } }, /threadID|thread/i],
     [{ ampMcp: { url: AMP_URL, conversationId: PUCK } }, /conversationId|unrecognized/i],
     [{ maxConcurrentRuns: 17 }, /maxConcurrentRuns/],
     [{ maxConcurrentRuns: 0 }, /maxConcurrentRuns/],
   ];
-  for (const [extra, message] of legacy) await assert.rejects(boot(extra), message);
+  for (const [extra, message] of invalid) await assert.rejects(boot(extra), message);
   const sixteen = await fixture({ maxConcurrentRuns: 16, ampMcp: {} });
   try {
     const result = await call(sixteen, 'droid_list_workspaces', {});
@@ -580,60 +596,11 @@ test('configuration: no default recipient, no thread-bound endpoint, capacity bo
   } finally { await done(sixteen); }
 });
 
-test('durability: v2 migration with retained backup, restart, crash fail-closed, queue loss', async (t) => {
+test('durability: restart, crash fail-closed, queue loss', async (t) => {
   const h0 = await fixture({ maxConcurrentRuns: 1 });
   const dir = h0.dir;
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   await stop(h0);
-
-  await t.test('v2 state migrates to sessions; backup is byte-identical; heads, unknown and idempotency survive', async () => {
-    const workspace = join(dir, 'workspace');
-    const mockHome = join(dir, 'mock');
-    const [s1, s2, lost] = [randomUUID(), randomUUID(), randomUUID()];
-    const run = (n, extra) => ({ runId: randomUUID(), requestKey: `legacy-${n}`, fingerprint: 'f'.repeat(64), workspace, autonomy: 'off', createdAt: `2026-10-0${n}T00:00:00.000Z`, updatedAt: `2026-10-0${n}T00:00:00.000Z`, droidSessionId: null, state: 'succeeded', events: [], textTail: `legacy output ${n}`, stderrTail: '', ...extra });
-    const r1 = run(1, { droidSessionId: s1 });
-    const r2 = run(2, { droidSessionId: s1, parentRunId: r1.runId, puckConversationId: PUCK });
-    const r3 = run(3, { droidSessionId: s2 });
-    const r4 = run(4, { droidSessionId: lost, state: 'unknown', error: 'Controller stopped before a durable terminal outcome.' });
-    const r5 = run(5, { state: 'failed', error: 'setup failed' });
-    for (const id of [s1, s2, lost]) writeFileSync(join(mockHome, `${id}.json`), JSON.stringify({ cwd: workspace, settings: {} }));
-    const runs = Object.fromEntries([r1, r2, r3, r4, r5].map((r) => [r.runId, r]));
-    const v2 = { version: 2, host: hostname(), home: homedir(), factoryHomeOverride: null, runs, sessionHeads: { [s1]: r2.runId, [s2]: r3.runId, [lost]: r4.runId } };
-    mkdirSync(join(dir, 'state'), { recursive: true, mode: 0o700 });
-    const original = JSON.stringify(v2);
-    writeFileSync(join(dir, 'state/state.json'), original, { mode: 0o600 });
-    const h = decorate(await boot({ maxConcurrentRuns: 1, ampMcp: {} }, {}, dir));
-    try {
-      const state = readState(h);
-      assert.equal(state.version, 3);
-      assert.equal(Object.keys(state.sessions).length, 4, 'two runs of one Droid session share one controller session; the setup failure is its own');
-      assert.equal(readFileSync(join(dir, 'state/state.json.v2.bak'), 'utf8'), original, 'pre-migration backup is byte-identical');
-      assert.equal((readdirSync(join(dir, 'state')).filter((f) => f.includes('.bak'))).length, 1);
-      assert.equal(state.sessions[state.runs[r2.runId].sessionId].headRunId, r2.runId);
-      assert.equal(state.runs[r1.runId].sessionId, state.runs[r2.runId].sessionId);
-      assert.equal(state.sessions[state.runs[r2.runId].sessionId].replyTo, PUCK, 'recorded explicit routing is preserved, not rewritten');
-      assert.equal(state.sessions[state.runs[r3.runId].sessionId].replyTo, null);
-      assert.ok(!readFileSync(join(dir, 'state/state.json'), 'utf8').includes('"prompt"'));
-      // Old handles and idempotency still work through the deprecated aliases.
-      assert.equal((await call(h, 'droid_status', { runId: r2.runId })).droidSessionId, s1);
-      await assert.rejects(call(h, 'droid_start', { requestKey: 'legacy-1', prompt: 'x', workspace }), /requestKey|different/i);
-      // Unknown outcome stays fail-closed through the new surface.
-      const unknownSession = state.runs[r4.runId].sessionId;
-      const status = await call(h, 'droid_get_session_status', { session: unknownSession });
-      assert.equal(status.agentState.state, 'unknown');
-      const hist = await call(h, 'droid_read_session', { session: unknownSession });
-      assert.equal(hist.historyAvailable, false, 'a migrated turn without a transcript is not advertised as complete');
-      assert.ok(hist.messages.some((m) => m.type === 'notice' && /No transcript/.test(m.text)));
-      assert.equal((await call(h, 'droid_wait_for_sessions', { sessions: [unknownSession], timeoutSeconds: 0 })).settled, true);
-      await rejectsWith(call(h, 'droid_send_message', { session: unknownSession, requestKey: 'u', message: 'x', model: 'mock-model' }), 'session_unknown_outcome');
-      await assert.rejects(call(h, 'droid_continue', { runId: r4.runId, requestKey: 'u2', prompt: 'x' }), /unknown|reconcile/i);
-      // A migrated head can be continued with the new tool; the old ancestor cannot.
-      await assert.rejects(call(h, 'droid_continue', { runId: r1.runId, requestKey: 'stale', prompt: 'x' }), (e) => e.code === 'not_session_head' && e.headRunId === r2.runId);
-      const next = await call(h, 'droid_send_message', { session: state.runs[r3.runId].sessionId, requestKey: 'after-migrate', message: 'continue', model: 'mock-model' });
-      await h.settle([next.status.metadata.session]);
-      assert.equal(audit(h).filter((x) => x.method === 'droid.load_session').at(-1).params.sessionId, s2);
-    } finally { await stop(h); }
-  });
 
   await t.test('crash: running becomes unknown, queued never starts or replays, titles/labels persist', async () => {
     const h = decorate(await boot({ maxConcurrentRuns: 1 }, {}, dir));
@@ -664,41 +631,7 @@ test('durability: v2 migration with retained backup, restart, crash fail-closed,
   });
 });
 
-test('aliases: the seven legacy tools are thin views over the session core', async (t) => {
-  const h = await fixture({ ampMcp: {} });
-  t.after(() => done(h));
-  await t.test('droid_start creates a core session, detached unless puckConversationId is explicit', async () => {
-    const run = await call(h, 'droid_start', { requestKey: 'alias-1', workspace: h.ws(), prompt: 'normal' });
-    assert.equal(run.terminal, false);
-    const sessionId = readState(h).runs[run.runId].sessionId;
-    const status = await h.status(sessionId);
-    assert.equal(status.metadata.replyTo, null, 'no host-default recipient is ever inferred');
-    assert.equal(status.latestRun.runId, run.runId);
-    assert.ok((await call(h, 'droid_find_sessions', {})).sessions.some((s) => s.metadata.session === sessionId));
-    const routed = await call(h, 'droid_start', { requestKey: 'alias-2', workspace: h.ws(), prompt: 'normal', puckConversationId: PUCK });
-    assert.equal((await h.status(readState(h).runs[routed.runId].sessionId)).metadata.replyTo, PUCK);
-  });
-  await t.test('droid_continue keeps no-queue semantics and the legacy string error shape', async () => {
-    const run = await call(h, 'droid_start', { requestKey: 'alias-3', workspace: h.ws(), prompt: 'slow' });
-    const raw = await h.client.callTool({ name: 'droid_continue', arguments: { runId: run.runId, requestKey: 'alias-3b', prompt: 'x' } });
-    assert.equal(raw.isError, true);
-    assert.equal(typeof JSON.parse(raw.content[0].text).error, 'string');
-    // A setup cancellation may happen before any Droid UUID exists. This case
-    // specifically verifies resuming an initialized session, not that race.
-    await h.waitFor(() => readState(h).runs[run.runId].droidSessionId, 'durable session UUID');
-    await call(h, 'droid_cancel', { runId: run.runId });
-    await h.settle([readState(h).runs[run.runId].sessionId]);
-    const next = await call(h, 'droid_continue', { runId: run.runId, requestKey: 'alias-3c', prompt: 'follow' });
-    const sessionId = readState(h).runs[run.runId].sessionId;
-    assert.equal(readState(h).runs[next.runId].sessionId, sessionId);
-    await h.settle([sessionId]);
-    const droidId = readState(h).sessions[sessionId].droidSessionId;
-    assert.match(droidId, /^[0-9a-f-]{36}$/);
-    assert.equal(audit(h).filter((x) => x.method === 'droid.load_session').at(-1).params.sessionId, droidId, 'the continuation resumed the first turn\'s Droid session');
-  });
-});
-
-test('review fixes: default-deny, revoked workspace, scrubbing, reporting, migration and pagination hardening', async (t) => {
+test('review fixes: default-deny, revoked workspace, scrubbing, reporting and pagination hardening', async (t) => {
   await t.test('a brand-new Amp tool is denied automatically; an undeniable one fails the run closed', async () => {
     const h = await fixture({ ampMcp: { url: AMP_URL } }, { MOCK_PUCK_FAILURE: 'new-tool' });
     try {
@@ -741,7 +674,7 @@ test('review fixes: default-deny, revoked workspace, scrubbing, reporting, migra
     } finally { await done(h); }
   });
 
-  await t.test('dates need a real UTC offset; admitted vs queued disposition; legacy continue fingerprints the parent', async () => {
+  await t.test('dates need a real UTC offset; admitted vs queued disposition', async () => {
     const h = await fixture({ maxConcurrentRuns: 1 });
     try {
       for (const bad of ['2026-10-01T00:00:00+25:00', '2026-10-01T00:00:00+00:99']) {
@@ -756,17 +689,10 @@ test('review fixes: default-deny, revoked workspace, scrubbing, reporting, migra
       assert.equal(sent.disposition, 'queued', 'a turn waiting for capacity is not "started"');
       assert.equal((await h.send(idle.metadata.session, 'disp-send', 'later')).disposition, 'queued', 'replays keep it');
       await h.settle([busy.metadata.session, idle.metadata.session]);
-      // Legacy continuation: same key from a different parent is a different intent.
-      const a = await call(h, 'droid_start', { requestKey: 'lc-a', prompt: 'normal', workspace: h.ws('lc') });
-      await h.settle([readState(h).runs[a.runId].sessionId]);
-      const b = await call(h, 'droid_continue', { runId: a.runId, requestKey: 'lc-k', prompt: 'next' });
-      await h.settle([readState(h).runs[b.runId].sessionId]);
-      assert.equal((await call(h, 'droid_continue', { runId: a.runId, requestKey: 'lc-k', prompt: 'next' })).runId, b.runId, 'identical retry from the original parent');
-      await assert.rejects(call(h, 'droid_continue', { runId: b.runId, requestKey: 'lc-k', prompt: 'next' }), /different/i);
     } finally { await done(h); }
   });
 
-  await t.test('corrupt state is refused without rewriting: bad legacy timestamps, duplicate session sequence numbers', async () => {
+  await t.test('corrupt state is refused without rewriting: duplicate session sequence numbers', async () => {
     const h = await fixture();
     const s1 = await h.create('seq-1', 'normal');
     const s2 = await h.create('seq-2', 'normal', { workspace: h.ws('seq2') });
@@ -783,17 +709,6 @@ test('review fixes: default-deny, revoked workspace, scrubbing, reporting, migra
     const lowNext = structuredClone(good); lowNext.nextSeq = 1;
     writeFileSync(path, JSON.stringify(lowNext));
     await assert.rejects(boot({}, {}, h.dir), /nextSeq/);
-    // v2 with an unparseable updatedAt must not be silently rewritten into invalid v3.
-    const v2 = { version: 2, host: good.host, home: good.home, factoryHomeOverride: good.factoryHomeOverride, sessionHeads: {}, runs: {} };
-    const run = Object.values(good.runs)[0];
-    const { sessionId, replyTo, disposition, preview, ...legacyRun } = run;
-    v2.runs[run.runId] = { ...legacyRun, updatedAt: 'not-a-timestamp' };
-    v2.sessionHeads[run.droidSessionId] = run.runId;
-    const bytes = JSON.stringify(v2);
-    writeFileSync(path, bytes);
-    await assert.rejects(boot({}, {}, h.dir), /updatedAt|Corrupt/);
-    assert.equal(readFileSync(path, 'utf8'), bytes);
-    assert.ok(!existsSync(`${path}.v2.bak`), 'no backup for a migration that was refused');
     rmSync(h.dir, { recursive: true, force: true });
   });
 });
@@ -912,7 +827,7 @@ test('adversarial fixes: unexpected worker death, default-deny aliases, admissio
     writeCatalog(h, { mode: 'hang' });
     h.client.callTool({ name: 'droid_models', arguments: {} }).catch(() => {});
     await sleep(300);
-    const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'droid_start', arguments: { requestKey: 'after-shutdown', workspace: h.ws(), prompt: 'normal' } } });
+    const body = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'droid_create_session', arguments: { requestKey: 'after-shutdown', workspace: h.ws(), prompt: 'normal', model: 'mock-model', replyTo: null } } });
     const outcome = new Promise((resolve) => {
       const req = httpRequest(h.url, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'content-type': 'application/json', accept: 'application/json, text/event-stream', 'content-length': Buffer.byteLength(body) } }, (res) => { let text = ''; res.on('data', (c) => { text += c; }); res.on('end', () => resolve(text)); });
       req.on('error', () => resolve('connection-error'));
@@ -938,7 +853,7 @@ test('adversarial fixes: unexpected worker death, default-deny aliases, admissio
     } finally { await done(h); }
   });
 
-  await t.test('durability: failed write leaves nothing accepted; refused migrations keep their own preimage; corrupt state refuses', async () => {
+  await t.test('durability: failed write leaves nothing accepted; unsupported and corrupt state refuse without rewriting', async () => {
     const h = await fixture();
     const a = await h.create('dur-a', 'normal');
     await h.settle([a.metadata.session]);
@@ -956,16 +871,8 @@ test('adversarial fixes: unexpected worker death, default-deny aliases, admissio
     await refuse((s) => { const copy = { ...Object.values(s.runs)[0], runId: randomUUID() }; s.runs[copy.runId] = copy; }, /duplicate requestKey/);
     await refuse((s) => { s.sessions[run.sessionId].droidSessionId = randomUUID(); }, /different from its controller session/);
     await refuse((s) => { s.sessions[run.sessionId].droidSessionId = null; }, /different from its controller session/);
-    // A pre-existing backup is kept and THIS migration's preimage is retained under its own name.
-    const v2 = { version: 2, host: good.host, home: good.home, factoryHomeOverride: good.factoryHomeOverride, sessionHeads: { [run.droidSessionId]: run.runId }, runs: { [run.runId]: (({ sessionId, replyTo, disposition, preview, submittedAt, ...rest }) => rest)(run) } };
-    const v2Bytes = JSON.stringify(v2);
-    writeFileSync(path, v2Bytes); writeFileSync(`${path}.v2.bak`, 'older backup');
-    const migrated = await boot({}, {}, h.dir);
-    await stop(migrated);
-    assert.equal(readFileSync(`${path}.v2.bak`, 'utf8'), 'older backup', 'an existing backup is never overwritten');
-    const extra = readdirSync(join(h.dir, 'state')).filter((f) => f.startsWith('state.json.v2.bak.'));
-    assert.equal(extra.length, 1);
-    assert.equal(readFileSync(join(h.dir, 'state', extra[0]), 'utf8'), v2Bytes, 'the new backup is this migration\'s exact preimage');
+    for (const version of [1, 2, 4]) await refuse((s) => { s.version = version; }, /version/);
+    for (const field of ['replyHandles', 'replyRouteId']) await refuse((s) => { delete s.runs[run.runId][field]; }, new RegExp(field));
     // An incomplete terminal result is never promoted to an outcome.
     writeFileSync(path, JSON.stringify(good));
     const resultPath = join(h.dir, 'state', `${run.runId}.result.json`);

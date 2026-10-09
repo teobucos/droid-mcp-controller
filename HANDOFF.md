@@ -229,9 +229,9 @@ rotation requires updating both the local token file and stored MCP credential.
 Do not select authentication `none`, recreate a healthy connection, or rotate
 credentials just to upgrade controller source.
 
-Check-server and tool discovery must reveal the 11 session tools
-(`droid_create_session` ... `droid_models`) plus the six deprecated aliases
-(17 tools; `droid_models` is shared). For a connection named **Droid Grokbot**, Puck
+Check-server and tool discovery must reveal exactly the 11 session tools
+(`droid_create_session` ... `droid_models`). Removed names must fail at dispatch;
+refresh cached catalogs and update callers before reuse. For a connection named **Droid Grokbot**, Puck
 imports from `droid-grokbot` through `code_exec`, as in README.md and
 [docs/TOOLS.md](docs/TOOLS.md). Run an actual read-only create/wait/read/send and a
 separate cancel through that remote connection: local smoke is not cloud/Puck
@@ -286,7 +286,7 @@ guess AskUser answers. Acceptance/queued/working/silence is not approval; steeri
 stays within existing authorization. Wording cannot override permission cancellation,
 and mock text pins do not establish model obedience. See README.md for the full protocol.
 
-Release a reserved execution slot only after metadata checks and safe migration.
+Release a reserved execution slot only after state validation and runtime checks.
 Have Puck launch separate economical sessions with unique markers and `replyTo` set. Require
 actual agent-origin messages in the designated Puck conversation and a reply read
 back by Droid. Record handles and tools used; no application edits, admin calls
@@ -302,17 +302,14 @@ owners; inspect processes locally before removing a stale lock. If `.startup-loc
 survives a crash, verify no controller is running before removing that empty
 directory. Never remove locks to run two controllers on the same store.
 
-The first upgraded startup atomically migrates v1 state to v2, removes original
-prompt fields and selects each initial session head by durable acceptance time.
-IDs, fingerprints, outcomes and per-run results stay intact; unknown sessions
-remain blocked. Invalid state/timestamps/heads refuse startup without resetting
-history. Back up stopped private state before upgrading. Inspect head choices
-locally if the old controller allowed misleading branches; the latest accepted
-run, not its parent edges, becomes head. A downgrade needs the matched v1 backup
-and old source. Sensitive prompts may still exist in backups, assistant echoes,
-permission context and Factory's own session history.
-Old result files are deliberately preserved; new result files omit SDK copies
-of submitted user messages, not independently generated assistant output.
+Startup accepts only current v3 session state, including durable reply ownership
+and route generations. It does not migrate old formats or infer missing ownership.
+IDs, fingerprints, outcomes and per-turn results stay intact; unknown sessions
+remain blocked. Invalid state refuses startup without resetting history. Back up
+stopped private state before upgrading, along with matching source and dependencies.
+See docs/CUTOVER.md for deploy and rollback. Preserve existing result files and
+credentials. Sensitive prompts may exist in old backups, assistant echoes,
+permission context and Factory history; new results omit SDK user-message copies.
 
 Confirm explicit host autonomy policy during upgrade: High/full access supersedes
 the earlier default-off/blanket-permission-decline specification. High approves

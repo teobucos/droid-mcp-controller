@@ -45,9 +45,10 @@ export async function boot(extra = {}, envExtra = {}, existing) {
 
 export async function stop(handle, signal = 'SIGTERM') {
   await handle.client.close();
-  if (handle.proc.exitCode === null) {
+  if (handle.proc.exitCode === null && handle.proc.signalCode === null) {
+    const exited = once(handle.proc, 'exit');
     handle.proc.kill(signal);
-    await once(handle.proc, 'exit');
+    await exited;
   }
 }
 
@@ -55,7 +56,7 @@ export async function stop(handle, signal = 'SIGTERM') {
 export async function call(handle, name, args) {
   const result = await handle.client.callTool({ name, arguments: args });
   const value = JSON.parse(result.content[0].text);
-  if (result.isError) throw Object.assign(new Error(typeof value.error === 'string' ? value.error : value.error?.message), typeof value.error === 'string' ? value : value.error);
+  if (result.isError) throw Object.assign(new Error(value.error?.message), value.error);
   if (result.structuredContent) return result.structuredContent;
   return value;
 }
