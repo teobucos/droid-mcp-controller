@@ -41,7 +41,7 @@ const COUNT = (n) => `Count from 1 to ${n}, one number per line. Do not use any 
 
 try {
   const tools = (await client.listTools()).tools.map((t) => t.name);
-  check('p0', '17 tools (11 session + 6 aliases) discovered', tools.length === 17);
+  check('p0', '11 session tools discovered', tools.length === 11);
   const ws0 = await call('droid_list_workspaces', {});
   check('p0', 'capacity maximum is 4', ws0.capacity.maximum === 4, ws0.capacity);
   const catalog = (await call('droid_models', {})).models.map((m) => m.id);

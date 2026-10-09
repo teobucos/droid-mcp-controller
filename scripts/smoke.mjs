@@ -59,7 +59,7 @@ try {
   }
   report.workspaces = await call('droid_list_workspaces', {});
   const key = `smoke-${randomUUID()}`;
-  const firstArgs = { requestKey: key, workspace: config.approvedDirectories[0], autonomy: 'off', model: values.model, replyTo: null, title: 'Controller smoke', prompt: 'Reply exactly DROID_MCP_SMOKE_OK. Do not call tools or edit files.' };
+  const firstArgs = { requestKey: key, workspace: config.approvedDirectories[0], autonomy: 'off', reasoningEffort: 'low', model: values.model, replyTo: null, title: 'Controller smoke', prompt: 'Reply exactly DROID_MCP_SMOKE_OK. Do not call tools or edit files.' };
   const created = await call('droid_create_session', firstArgs);
   session = created.metadata.session;
   if ((await call('droid_create_session', firstArgs)).metadata.session !== session) throw new Error('Idempotent create failed');
@@ -68,7 +68,7 @@ try {
     if (first.state !== 'failed' || !first.authFailureObserved) throw new Error('Expected a persisted terminal authentication failure');
   } else {
     if (first.state !== 'succeeded' || !first.markerMatched) throw new Error('Authenticated create did not return the expected marker');
-    const sent = await call('droid_send_message', { session, requestKey: `${key}-resume`, message: 'Reply exactly DROID_MCP_RESUME_OK. Do not call tools or edit files.', model: values.model, autonomy: 'off' });
+    const sent = await call('droid_send_message', { session, requestKey: `${key}-resume`, message: 'Reply exactly DROID_MCP_RESUME_OK. Do not call tools or edit files.', model: values.model, autonomy: 'off', reasoningEffort: 'low', replyTo: null });
     const second = await record(await settled(sent.status.metadata.session), 'DROID_MCP_RESUME_OK');
     if (second.state !== 'succeeded' || !second.markerMatched || second.session !== first.session || second.runId === first.runId) throw new Error('Authenticated resume failed');
     report.usage = await call('droid_get_usage', { session });

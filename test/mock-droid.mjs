@@ -64,7 +64,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
         if (catalog.error) {
           send({ ...envelope('response'), id: req.id, error: { code: -32000, message: catalog.error } }); return;
         }
-        persist(); reply(req, { sessionId: id, settings, session: { messages: [] }, ...(catalog.mode === 'missing' ? {} : { [process.env.MOCK_CATALOG_SNAKE === '1' ? 'available_models' : 'availableModels']: catalog }) });
+        persist(); reply(req, { sessionId: id, settings, session: { messages: [] }, ...(catalog.mode === 'missing' ? {} : { availableModels: catalog }) });
         if (process.env.MOCK_CATALOG_UNRELATED === '1') reply({ id: 'unrelated-response' }, { sessionId: randomUUID(), availableModels: [{ id: 'poison', displayName: 'Unrelated' }] });
         break;
       }

@@ -1,5 +1,9 @@
 # Approved-send provenance correction
 
+Historical evidence for the linked revision, not the current deployment status.
+Ownership backfill has since been removed; current durable ownership is preserved.
+See TOOLS.md and CUTOVER.md for current behavior.
+
 Date: 2026-10-09 UTC. Corrected source:
 [`e4387ccca773efd123755309692660593efb416c`](https://github.com/teobucos/droid-mcp-controller/commit/e4387ccca773efd123755309692660593efb416c).
 This correction is awaiting exact-SHA independent High re-review. It is not merged,

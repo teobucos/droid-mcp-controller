@@ -146,14 +146,3 @@ List the models currently available to this controller's authenticated Factory a
 _none_
 
 **Output**: JSON object with `fetchedAt`, `models`
-
-## Deprecated aliases (kept so existing clients keep working)
-
-These are thin views over the same session core and use the original run-shaped outputs and string errors. `droid_models` is shared with the session tools.
-
-- `droid_start`: Start a durable asynchronous Droid task (a one-turn view of droid_create_session). Detached unless puckConversationId is explicit. Approved workspace roots: ["/approved/root"]. Autonomy ceiling: high. Default autonomy: high. Host reasoning effort: high. Call droid_models and pass a current model id explicitly.
-- `droid_continue`: Continue only the current head run of a session without queueing (droid_send_message). Returns a NEW runId. Approved workspace roots: ["/approved/root"]. Autonomy ceiling: high. Default autonomy: high. Host reasoning effort: high. Call droid_models and pass a current model id explicitly.
-- `droid_status`: Run state, events, partial text and stderr for one run (droid_get_session_status).
-- `droid_result`: Paginated final text and outcome for one run (droid_read_session).
-- `droid_list`: List runs, newest first (droid_find_sessions).
-- `droid_cancel`: Cancel one run (droid_cancel_session).

@@ -12,9 +12,9 @@ class PuckMcpServer extends McpServer {
   }
 }
 
-export function createMcp(controller, models, config) {
+export function createMcp(controller, models) {
   const server = new PuckMcpServer({ name: 'droid-controller', version: '0.2.0' });
-  for (const tool of defineTools(controller, models, config)) {
+  for (const tool of defineTools(controller, models)) {
     server.registerTool(tool.name, {
       description: tool.description, inputSchema: tool.input, ...(tool.output ? { outputSchema: tool.output } : {}),
       annotations: { readOnlyHint: tool.readOnly, destructiveHint: !tool.readOnly, openWorldHint: !tool.readOnly },
@@ -23,10 +23,9 @@ export function createMcp(controller, models, config) {
         const value = await tool.run(args, extra);
         return { content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value };
       } catch (error) {
-        return toolFailure(error, { legacy: tool.legacy });
+        return toolFailure(error);
       }
     });
   }
   return server;
 }
-

@@ -1,6 +1,6 @@
 // Session core. A controller session owns one linear chain of turns ("runs") over
-// one Droid session. Every tool, including the deprecated aliases, goes through
-// create()/send(); the scheduler admits turns FIFO under three rules:
+// one Droid session. create()/send() accept turns; the scheduler admits them
+// FIFO under three rules:
 //   1. global capacity (maxConcurrentRuns),
 //   2. one live turn per session,
 //   3. canonical workspace reader/writer locks (off = reader, anything else = writer).
@@ -13,9 +13,9 @@ import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { approvedWorkspace, pathsOverlap, contains } from './config.mjs';
 import { ToolError } from './errors.mjs';
-import { openStore, atomicJson, defaultTitle, resultState, legacyFingerprint, completeResult, LIVE, WORKING } from './store.mjs';
-import { sessionStatus, isWorking, resultMessages, noticeMessage, turnNotices, legacyRun } from './views.mjs';
-import { isReplyHandle, legacyReplyHandles } from './puck.mjs';
+import { openStore, atomicJson, defaultTitle, resultState, LIVE, WORKING } from './store.mjs';
+import { sessionStatus, isWorking, resultMessages, noticeMessage, turnNotices } from './views.mjs';
+import { isReplyHandle } from './puck.mjs';
 
 const levels = ['off', 'low', 'medium', 'high'];
 const MAX_QUEUED = 64;
@@ -49,34 +49,6 @@ export class Controller {
     this.keys = new Map();
     this.bySession = new Map();
     for (const run of Object.values(this.state.runs).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))) this.index(run);
-    let backfilled = false;
-    const previous = new Map();
-    // Run records retain insertion/acceptance order. Persist route generations
-    // independently of wall-clock sorting, so detach-and-return never revives
-    // an old capability after restart or a clock adjustment.
-    for (const run of Object.values(this.state.runs)) {
-      const prior = previous.get(run.sessionId);
-      if (run.replyRouteId === undefined) {
-        run.replyRouteId = prior && prior.replyTo === run.replyTo ? prior.replyRouteId : run.runId;
-        backfilled = true;
-      }
-      previous.set(run.sessionId, run);
-    }
-    for (const run of Object.values(this.state.runs)) if (run.replyHandles === undefined) {
-      run.replyHandles = [];
-      if (run.replyTo && run.result && run.reply?.state === 'accepted') {
-        try {
-          const result = JSON.parse(readFileSync(this.store.resultPath(run.runId), 'utf8'));
-          if (completeResult(result) && result.sessionId === run.droidSessionId) run.replyHandles = legacyReplyHandles(run, result);
-        } catch (error) {
-          // Missing/corrupt old provenance cannot grant authority. Other I/O
-          // failures stop startup rather than silently losing durable ownership.
-          if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error;
-        }
-      }
-      backfilled = true;
-    }
-    if (backfilled) this.store.save();
   }
 
   index(run) {
@@ -102,10 +74,6 @@ export class Controller {
     if (!Object.hasOwn(this.state.sessions, id)) throw new ToolError('unknown_session', 'Unknown session handle');
     return this.state.sessions[id];
   }
-  run(id) {
-    if (!Object.hasOwn(this.state.runs, id)) throw new ToolError('unknown_run', 'Unknown controller runId (not a Droid session UUID)');
-    return this.state.runs[id];
-  }
   // Persist a change and wake waiters. Progress-only changes are coalesced.
   changed(run, { soon = false } = {}) {
     run.updatedAt = now();
@@ -114,7 +82,7 @@ export class Controller {
     this.changes.emit('change');
   }
 
-  // ---- new surface ---------------------------------------------------------
+  // ---- session surface -----------------------------------------------------
   status(sessionId) {
     const session = this.session(sessionId);
     return sessionStatus(session, this.runsOf(sessionId));
@@ -125,14 +93,9 @@ export class Controller {
     return this.status(this.accept({ kind: 'create', ...args }).sessionId);
   }
 
-  // Deprecated droid_start: same intake, no catalog check, run-shaped answer for the accepted key.
-  legacyStart(args) {
-    return this.legacyStatus(this.accept({ kind: 'create', ...args, legacy: true }).runId);
-  }
-
-  async send(args, guard) {
-    if (!guard && !this.keys.has(args.requestKey)) await this.checkSettings(args);
-    const run = this.accept({ kind: 'send', ...args, guard });
+  async send(args) {
+    if (!this.keys.has(args.requestKey)) await this.checkSettings(args);
+    const run = this.accept({ kind: 'send', ...args });
     return { runId: run.runId, disposition: run.disposition, status: this.status(run.sessionId) };
   }
 
@@ -155,28 +118,19 @@ export class Controller {
     const workspace = approvedWorkspace(this.config, target ? target.workspace : intent.workspace);
     if (target && workspace !== target.workspace) throw new ToolError('workspace_not_approved', 'The session workspace no longer resolves to the directory it was created in');
     const dup = this.keys.has(requestKey) ? this.state.runs[this.keys.get(requestKey)] : null;
-    // Replays retain their accepted defaults, including records predating per-turn settings.
+    // Replays retain their accepted defaults even if host policy changed.
     const autonomy = intent.autonomy ?? dup?.autonomy ?? this.config.defaultAutonomy;
     const reasoningEffort = intent.reasoningEffort ?? (dup ? dup.reasoningEffort : this.config.reasoningEffort);
     const replyTo = intent.replyTo !== undefined ? intent.replyTo : dup ? dup.replyTo : target.replyTo;
     const labels = intent.labels ? [...new Set(intent.labels)].sort() : [];
     const fingerprint = sha({
       kind, target: target?.sessionId ?? workspace, prompt: intent.prompt, autonomy, model: intent.model ?? null, reasoningEffort: reasoningEffort ?? null,
-      replyTo, interrupt: Boolean(intent.interrupt), title: intent.title ?? null, labels, continuesRun: intent.guard?.headRunId ?? null,
+      // This fixed slot is part of the persisted session API hash format. Changing
+      // it would invalidate current request keys; original prompts are not retained.
+      replyTo, interrupt: Boolean(intent.interrupt), title: intent.title ?? null, labels, continuesRun: null,
     });
     if (dup) {
-      // Only legacy aliases may compare the published hashes. Unknown raw-v1
-      // hashes (version 0) and modern caller options never gain that fallback.
-      const legacy = (intent.legacy || intent.guard) && intent.title === undefined && !labels.length && !intent.interrupt
-        && ([1, 2].includes(dup.fingerprintVersion) || (dup.fingerprintVersion === undefined && Object.hasOwn(dup, 'parentRunId')));
-      const historical = { workspace, prompt: intent.prompt, autonomy, model: intent.model, parentRunId: intent.guard?.headRunId ?? null, reasoningEffort, puckConversationId: replyTo };
-      const later = legacy && dup.fingerprintVersion !== 1 && dup.fingerprint === legacyFingerprint(historical, 2);
-      // Prompt-free v2/old-v3 records cannot be classified at startup. A matching
-      // five-field candidate is safe only without ANY new per-turn reasoning or
-      // routing: 98e0e7 supported neither. Never ignore a modern caller option.
-      const original = legacy && intent.reasoningEffort === undefined && !replyTo && !dup.replyTo
-        && dup.fingerprint === legacyFingerprint(historical, 1);
-      if (dup.fingerprint !== fingerprint && !later && !original) throw new ToolError('request_key_conflict', 'requestKey was already used with different arguments');
+      if (dup.fingerprint !== fingerprint) throw new ToolError('request_key_conflict', 'requestKey was already used with different arguments');
       return dup;
     }
     if (levels.indexOf(autonomy) > levels.indexOf(this.config.maxAutonomy)) throw new ToolError('autonomy_exceeds_ceiling', `Requested autonomy exceeds configured maxAutonomy (${this.config.maxAutonomy})`);
@@ -186,10 +140,6 @@ export class Controller {
     if (target) {
       runs = this.runsOf(target.sessionId);
       if (runs.some((run) => run.state === 'unknown')) throw new ToolError('session_unknown_outcome', 'Session has an unknown outcome; reconcile it locally before further work');
-      if (intent.guard) {
-        if (isWorking(runs)) throw new ToolError('session_busy', 'Session has an active turn; cancel/wait before continuing');
-        if (target.headRunId !== intent.guard.headRunId) throw new ToolError('not_session_head', 'Run is not the current head of this Droid session', { headRunId: target.headRunId });
-      }
       if (!intent.interrupt && runs.filter((run) => WORKING.has(run.state)).length >= MAX_PENDING_PER_SESSION) throw new ToolError('queue_full', 'Too many turns are already pending on this session');
     }
     const superseded = intent.interrupt ? runs.filter((run) => run.state === 'queued') : [];
@@ -206,7 +156,7 @@ export class Controller {
     const runId = randomUUID();
     const run = {
       runId, sessionId: session.sessionId, requestKey, fingerprint, workspace, autonomy, model: intent.model ?? null,
-      replyRouteId: target && target.replyTo === replyTo ? this.run(target.headRunId).replyRouteId : runId,
+      replyRouteId: target && target.replyTo === replyTo ? this.state.runs[target.headRunId].replyRouteId : runId,
       ...(reasoningEffort ? { reasoningEffort } : {}), replyTo, disposition, state: 'queued', createdAt: stamp, updatedAt: stamp,
       droidSessionId: null, replyHandles: [], events: [], textTail: '', stderrTail: '', preview: '', cancelRequested: false,
     };
@@ -523,41 +473,6 @@ export class Controller {
       capacity: { maximum, active: this.workers.size, queued: this.queue.length, available: Math.max(0, maximum - this.workers.size) },
       policy: { defaultAutonomy: this.config.defaultAutonomy, maxAutonomy: this.config.maxAutonomy, reasoningEffort: this.config.reasoningEffort ?? null, replyBack: Boolean(this.config.ampMcp) },
     };
-  }
-
-  // ---- deprecated run-shaped views (thin: same records, old shapes) ---------
-  parentOf(run) {
-    const ids = this.bySession.get(run.sessionId);
-    return ids[ids.indexOf(run.runId) - 1] ?? null;
-  }
-  legacyStatus(runId) { const run = this.run(runId); return legacyRun(run, this.parentOf(run)); }
-  legacyList({ offset = 0, limit = 25 } = {}) {
-    const runs = Object.values(this.state.runs).reverse();
-    return { runs: runs.slice(offset, offset + limit).map((run) => legacyRun(run, this.parentOf(run))), total: runs.length, nextOffset: offset + limit < runs.length ? offset + limit : null };
-  }
-  legacyResult({ runId, offset = 0, limit = 12000 }) {
-    const run = this.run(runId);
-    const result = run.result ? JSON.parse(readFileSync(this.store.resultPath(runId), 'utf8')) : null;
-    const text = result?.text ?? run.textTail;
-    return {
-      ...this.legacyStatus(runId), resultAvailable: Boolean(result), partial: !result,
-      text: text.slice(offset, offset + limit), totalCharacters: text.length,
-      nextOffset: offset + limit < text.length ? offset + limit : null,
-      outcome: result ? { subtype: result.subtype, success: result.success, durationMs: result.durationMs, tokenUsage: result.tokenUsage, error: result.error, structuredOutputError: result.structuredOutputError } : null,
-    };
-  }
-  legacyCancel(runId) {
-    const run = this.run(runId);
-    this.cancelRun(run);
-    this.pump();
-    return this.legacyStatus(runId);
-  }
-  // A legacy run handle names a turn; continuing means "the head of its session, never queued".
-  legacyContinue(args) {
-    const source = this.run(args.runId);
-    const { runId, prompt, puckConversationId, ...rest } = args;
-    return this.send({ ...rest, session: source.sessionId, prompt, ...(puckConversationId ? { replyTo: puckConversationId } : {}) }, { headRunId: source.runId })
-      .then(({ runId: next }) => this.legacyStatus(next));
   }
 
   async close() {

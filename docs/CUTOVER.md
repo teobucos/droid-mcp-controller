@@ -1,102 +1,63 @@
-# Cutover and rollback runbook (NOT executed by the implementation work)
+# Session-only deployment and rollback
 
-Replaces the running controller (old seven-tool, one-run-at-a-time, thread-bound Amp
-endpoint) with the session surface. It needs explicit approval from Puck **and** the
-owner, and an owner-present moment for the Amp sign-in. Generic names below: use your
-private paths. Never paste tokens, codes or private thread ids into this file or Git.
+Requires operator authorization. Use private paths below; never commit tokens,
+host configuration, state, personal thread IDs or runtime artifacts.
 
-## 0. Prerequisites (before any change)
+## Prerequisites
 
-1. Approvals recorded from Puck and the owner.
-2. **No active run.** Check `droid_list` / `droid_status` for the live service; wait for the
-   Acronew run to reach a terminal state or agree to cancel it. Reserve the slot.
-3. The sign-in below is done (it is additive and can be done days earlier).
-4. The branch builds: `npm ci --ignore-scripts && npm run check && npm test` on Node 22.
-5. Backups exist (steps 1 and 2).
+1. Implement and test in an isolated worktree on Node 22:
+   `npm ci --ignore-scripts && npm run check && npm test`.
+2. Merge the approved PR. Record the merge SHA, previous deployed SHA, local `main`
+   and fetched `origin/main` separately. The runtime executes `src/server.mjs`
+   directly; do not advance its checkout while it is serving work.
+3. Coordinate a no-new-work window with Puck/operator. Check
+   `droid_list_workspaces`: both active and queued must be zero. Recheck immediately
+   before stopping. Never cancel someone else's jobs for a deployment.
+4. Validate a private copy of current state against the new source without submitting
+   tasks. Only v3 with durable `replyHandles` and `replyRouteId` is supported;
+   unsupported state must block the deployment, not be reset or silently migrated.
+5. Record current session/run counts and result checksums for the preservation check.
 
-## 1. Amp sign-in for the thread-free endpoint (prerequisite regardless of outcome)
+## Back up and deploy
 
-Factory stores Amp MCP OAuth tokens **per exact endpoint URL**. The old token (for the
-thread-bound URL) does not authorize `https://ampcode.com/mcp?profile=external-agent`.
-Without this step every routed session fails fast with `amp_mcp_not_started` (and submits
-no task); detached sessions are unaffected.
+Use the existing supervisor's private configuration/socket. Stop only the controller,
+not the tunnel or unrelated services:
 
-1. Back up the Factory credential store file(s) to a private directory outside the repo
-   (`mkdir -m 700`, copy with mode 600, record `sha256sum` of `mcp-oauth.v2.file`,
-   `auth.v2.file`, `auth.v2.key`). Never print their contents.
-2. As the service user: `node scripts/amp-signin.mjs --config <controller config> --dir <private dir>`.
-   It uses the SDK's `authenticateMcpServer` through a project-level definition in a throwaway
-   workspace, so nothing is added to the user's persistent Factory MCP config. It writes the
-   authorization link to `<dir>/auth-url.txt` (600).
-3. The owner opens the link, approves, and copies the failing
-   `http://127.0.0.1:54621/callback?...` address back; place it in `<dir>/callback-url.txt` (600).
-   The helper delivers it to Factory's own loopback listener. Tokens and the code are never
-   printed or logged. Links last 240 seconds (Factory's window); the helper reissues up to three times, so have the owner ready.
-4. Verify: only `mcp-oauth.v2.file` changed (the other two hashes are identical); the live URL's
-   entry is unchanged (the file is encrypted: compare that the previous bytes are still present
-   as a block, or re-run a detached smoke against the old service and watch it still work);
-   a routed session on a second instance reaches `notification: accepted`. The grant scope is
-   `email offline_access openid profile` (account-level, same as before).
-5. **Rollback of this step:** restore the backed-up `mcp-oauth.v2.file` **only if no other
-   writer has touched it since** (compare its current hash with the one recorded right after the
-   sign-in), or revoke the grant in the Amp account. The credential file is encrypted and is
-   rewritten wholesale, so entry-level comparison is not possible and nothing is decrypted.
-   `auth.v2.file` (Factory's own login) may also change from routine token refresh; do not roll
-   it back.
-6. **Accepted residual risk, owner sign-off required before cutover.** The thread-free endpoint
-   exposes `puck`, `manage_amp`, `find_thread` and `read_thread` server-side with an account-level grant
-   (scope `email offline_access openid profile`). The controller enforces default-deny of everything
-   except `puck` on the client side (and fails the run closed if it cannot); this is not credential
-   scoping. Sign-off line: `owner: ____________  accepted on ____________`.
-
-## 2. Back up controller state (controller stopped)
-
-```
-supervisorctl stop teobucos-droid-mcp          # tunnel stays up
-cp -a <stateDirectory> <private backups>/state-<timestamp>
-sha256sum <stateDirectory>/state.json
-cp <controller config> <private backups>/config-<timestamp>.json
+```sh
+supervisorctl -c <private supervisor config> stop teobucos-droid-mcp
+cp -a <stateDirectory> <private backup>/state
+cp <controller config> <private backup>/config.json
+git archive <previous deployed SHA> > <private backup>/source.tar
 ```
 
-## 3. Configuration change
+Retain matching dependencies and a manifest with hashes and the rollback SHA.
+Do not read or copy Factory credential files. Leave token, OAuth, workspace roots,
+service user/HOME, endpoint and tunnel configuration unchanged.
 
-| Key | Old | New |
-| --- | --- | --- |
-| `approvedDirectories` | two roots | add only the roots the owner approves |
-| `maxConcurrentRuns` | `1` | `4` (up to 16) |
-| `puck` | `{conversationId, url with threadID}` | **remove**; add `"ampMcp": {}` (startup rejects `puck` and thread-bound URLs) |
+Fast-forward the stopped runtime checkout to the merged `origin/main`; refuse a
+dirty/divergent checkout. Install locked dependencies only if the lockfile changed.
+Start the controller, verify its PID/cwd/argv and source bytes against the merge SHA.
+Compare state and results with the backup before creating acceptance work.
 
-Delete the duplicated project MCP definition (`.factory/mcp.json`) that repeats the old
-endpoint; the controller attaches the server itself. Keep `maxAutonomy`/`defaultAutonomy`/
-`reasoningEffort` as decided by the owner.
+## Acceptance
 
-## 4. Deploy
+- Unauthenticated HTTP is 401. Authenticated `tools/list` contains exactly the 11
+  tools in docs/TOOLS.md. Each removed name fails at dispatch, not merely discovery.
+- Existing sessions, results, request keys and unknown outcomes remain intact.
+- Run detached create/wait/read/send/usage with an explicitly selected current
+  model supporting `low`, `reasoningEffort:low`, `autonomy:off`, and `replyTo:null`
+  in the operator-approved smoke root. Check exact output and cleanup.
+- Refresh the connected client's MCP catalog. Puck independently retests the
+  connected MCP; local HTTP alone is not proof of public/cloud acceptance.
+- If a routed check is needed, use the actual requesting Puck conversation.
+  Existing credentials need no new sign-in for this source-only deployment.
 
-1. Check out the approved commit in the controller directory; `npm ci --ignore-scripts`.
-2. Start: `supervisorctl start teobucos-droid-mcp`. Startup migrates state v2 to v3,
-   keeps `state.json.v2.bak` (byte-identical) and recovers anything in flight as `unknown`.
-3. Confirm: listener up, `state.json.v2.bak` present and its `sha256` equals the pre-migration hash.
+## Rollback
 
-## 5. Acceptance (public route)
-
-1. Unauthenticated request returns 401; authenticated `tools/list` returns 17 tools.
-2. Reconnect or refresh the Amp connection (`tool_search droid`) so Puck sees the new tools.
-3. `droid_list_workspaces`: capacity `maximum: 4`, the approved roots, `policy.replyBack: true`.
-4. A detached `droid_create_session` with a small model; wait; read; usage.
-5. A routed session (`replyTo` = the Puck conversation) with a small model: expect
-   `notification.state: accepted` and the agent message arriving in that conversation.
-6. Three concurrent small sessions (distinct workspaces), one steered with `interrupt:true`, one
-   cancelled; the others finish. Old aliases (`droid_status` on a pre-migration run id) still work.
-7. Retarget or detach migrated sessions that still carry the archived recipient
-   (`droid_send_message` with `replyTo`) before reusing them.
-
-## 6. Rollback
-
-1. `supervisorctl stop teobucos-droid-mcp`.
-2. `mv state.json state.json.v3.rolledback`; `cp state.json.v2.bak state.json` (or restore the
-   full state backup from step 2). Keep result files.
-3. Restore the previous source revision and the backed-up config.
-4. `supervisorctl start teobucos-droid-mcp`; verify seven tools, prior results and idempotency.
-5. Remove only the new Amp per-URL entry (step 1.5). Leave the tunnel and bearer token alone.
-
-Work accepted under the new version (new sessions, labels, queue losses) is not visible to old code.
+First coordinate another idle window and stop only the controller. Restore the
+previous source and matching dependencies. This change keeps the current v3 state
+format, so preserve new accepted work; do not blindly replace state with an older
+backup. If restoring state is necessary, retain the failed deployment's complete
+state/results separately and reconcile any work accepted since the backup first.
+Restart and verify source provenance, authentication, history and capacity. Keep
+the tunnel, bearer token and Factory credentials unchanged.

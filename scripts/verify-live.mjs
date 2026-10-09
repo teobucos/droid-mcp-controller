@@ -1,5 +1,5 @@
 // Bounded, read-only authenticated smoke on a disposable STDIO controller.
-// Usage: node scripts/verify-live.mjs --droid /absolute/droid --model CURRENT_ID
+// Usage: node scripts/verify-live.mjs --droid /absolute/droid --model CURRENT_ID --workspace /approved/smoke/root
 // Requires existing CLI login. Never authenticates, updates CLI, starts a daemon,
 // changes global config, or messages Puck. Prints only sanitized assertions.
 import assert from 'node:assert/strict';
@@ -10,13 +10,13 @@ import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 
-const { values } = parseArgs({ options: { droid: { type: 'string' }, model: { type: 'string' } } });
-if (!values.droid?.startsWith('/') || !values.model) throw new Error('Pass --droid /absolute/droid --model CURRENT_ID (from the live catalog)');
+const { values } = parseArgs({ options: { droid: { type: 'string' }, model: { type: 'string' }, workspace: { type: 'string' } } });
+if (!values.droid?.startsWith('/') || !values.model || !values.workspace?.startsWith('/')) throw new Error('Pass --droid /absolute/droid --model CURRENT_ID (from the live catalog) --workspace /approved/smoke/root');
 const root = resolve(import.meta.dirname, '..');
 const scratch = join(root, '.amp/in');
 mkdirSync(scratch, { recursive: true, mode: 0o700 });
 const dir = mkdtempSync(join(scratch, 'live-verify-'));
-const workspace = join(dir, 'workspace'); mkdirSync(workspace);
+const workspace = values.workspace;
 const wire = join(dir, 'wire.jsonl');
 const config = { approvedDirectories: [workspace], stateDirectory: join(dir, 'state'), droidPath: values.droid, maxAutonomy: 'off', defaultAutonomy: 'off', runTimeoutMs: 60000, cancelGraceMs: 3000 };
 writeFileSync(join(dir, 'config.json'), JSON.stringify(config), { mode: 0o600 });
@@ -55,8 +55,9 @@ try {
   const two = await settle(session);
   check('continued_result', two.latestRun.state === 'succeeded' && two.preview.text.trim() === 'VERIFY_TWO');
   check('same_uuid', state().sessions[session].droidSessionId === id);
-  const result = await call('droid_result', { runId: two.latestRun.runId });
-  check('terminal_sdk_result', result.resultAvailable && result.outcome.success && result.outcome.tokenUsage.outputTokens > 0);
+  const history = await call('droid_read_session', { session });
+  const usage = await call('droid_get_usage', { session });
+  check('terminal_history_and_usage', history.historyAvailable && history.messages.some((m) => m.runId === two.latestRun.runId && m.text === 'VERIFY_TWO') && usage.turns === 2 && usage.tokens.outputTokens > 0);
   await call('droid_send_message', { session, requestKey: 'verify-cancel', message: 'Count from 1 to 10000, one number per line. Do not use any tools.', model: values.model, reasoningEffort: 'low', autonomy: 'off', replyTo: null });
   await until(() => audit().filter((m) => m.kind === 'response' && m.method === 'droid.add_user_message' && m.success).length === 3);
   await call('droid_cancel_session', { session });

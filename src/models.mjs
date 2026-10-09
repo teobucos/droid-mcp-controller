@@ -5,9 +5,9 @@ import { ToolError } from './errors.mjs';
 const catalogSchema = z.array(z.object({
   id: z.string().min(1), displayName: z.string().min(1), disabled: z.boolean().optional(),
   deprecated: z.boolean().optional(),
-  provider: z.string().optional(), modelProvider: z.string().optional(),
+  modelProvider: z.string().optional(),
   supportedReasoningEfforts: z.array(z.string()).optional(), defaultReasoningEffort: z.string().optional(),
-  supportsImages: z.boolean().optional(), noImageSupport: z.boolean().optional(), supportsPdfs: z.boolean().optional(), supportsPDFs: z.boolean().optional(),
+  noImageSupport: z.boolean().optional(), supportsPDFs: z.boolean().optional(),
 }));
 const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 
@@ -56,8 +56,8 @@ export class ModelCatalog {
         // Preserve ONLY the correlated initialization catalog. deprecated and
         // supportsPDFs were observed on authenticated CLI 0.236.0, not guessed.
         initializeId = undefined;
-        const { availableModels, available_models, ...result } = message.result;
-        catalog = availableModels ?? available_models;
+        const { availableModels, ...result } = message.result;
+        catalog = availableModels;
         handler(JSON.stringify({ ...message, result }));
       } else handler(line);
     });
@@ -70,11 +70,11 @@ export class ModelCatalog {
       const models = catalogSchema.parse(catalog).filter((model) => model.disabled !== true && model.deprecated !== true).map((model) => ({
         id: model.id, displayName: model.displayName,
         ...(model.deprecated !== undefined ? { deprecated: model.deprecated } : {}),
-        ...((model.provider ?? model.modelProvider) !== undefined ? { provider: model.provider ?? model.modelProvider } : {}),
+        ...(model.modelProvider !== undefined ? { provider: model.modelProvider } : {}),
         ...(model.supportedReasoningEfforts !== undefined ? { supportedReasoningEfforts: model.supportedReasoningEfforts } : {}),
         ...(model.defaultReasoningEffort !== undefined ? { defaultReasoningEffort: model.defaultReasoningEffort } : {}),
-        ...(model.supportsImages !== undefined ? { supportsImages: model.supportsImages } : model.noImageSupport !== undefined ? { supportsImages: !model.noImageSupport } : {}),
-        ...((model.supportsPdfs ?? model.supportsPDFs) !== undefined ? { supportsPdfs: model.supportsPdfs ?? model.supportsPDFs } : {}),
+        ...(model.noImageSupport !== undefined ? { supportsImages: !model.noImageSupport } : {}),
+        ...(model.supportsPDFs !== undefined ? { supportsPdfs: model.supportsPDFs } : {}),
       })).sort((a, b) => compare(a.displayName, b.displayName) || compare(a.id, b.id));
       return { fetchedAt: new Date().toISOString(), models };
     } finally {

@@ -10,7 +10,7 @@ const DEFAULT_CODE = { failed: 'run_failed', timed_out: 'timed_out', unknown: 'u
 const DEFAULT_MESSAGE = { failed: 'The turn failed.', timed_out: 'The turn exceeded the run timeout.', unknown: 'The turn outcome is unknown.' };
 
 // SDK, server and OS text can embed ids, paths and URLs (including OAuth fragments).
-// New tools return a scrubbed message; raw text stays in local state and legacy views.
+// Tools return a scrubbed message; raw text stays in local state.
 export const scrub = (text) => text
   .replace(/https?:\/\/\S+/g, '<url>')
   .replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<id>')
@@ -43,11 +43,8 @@ export const isWorking = (runs) => runs.some((run) => WORKING.has(run.state));
 
 export function sessionStatus(session, runs) {
   const head = runs.find((run) => run.runId === session.headRunId);
-  // Older v3 records lack the link; infer only for a predecessor_failed head,
-  // never permanently flag historical failures after a resolving turn.
   const predecessor = head.errorCode === 'predecessor_failed'
     ? runs.find((run) => run.runId === head.predecessorRunId)
-      ?? runs.slice(0, runs.indexOf(head)).findLast((run) => ['failed', 'timed_out'].includes(run.state) && !run.result)
     : null;
   const note = notification(head);
   const state = isWorking(runs) ? 'working' : runs.some((run) => run.state === 'unknown') ? 'unknown' : 'idle';
@@ -95,16 +92,4 @@ export function turnNotices(run) {
 
 export function noticeMessage(run, text) {
   return { id: `${run.runId}:notice`, runId: run.runId, role: 'controller', type: 'notice', ...clip(text) };
-}
-
-// Deprecated tools: the original run-shaped view, derived from the same records.
-export function legacyRun(run, parentRunId) {
-  return {
-    runId: run.runId, requestKey: run.requestKey, workspace: run.workspace, autonomy: run.autonomy, model: run.model ?? null,
-    ...(run.reasoningEffort ? { reasoningEffort: run.reasoningEffort } : {}),
-    ...(run.replyTo ? { puckConversationId: run.replyTo } : {}),
-    parentRunId, createdAt: run.createdAt, updatedAt: run.updatedAt, ...(run.finishedAt ? { finishedAt: run.finishedAt } : {}),
-    droidSessionId: run.droidSessionId, state: run.state, error: run.error ?? null, cancelRequested: run.cancelRequested ?? false,
-    events: run.events, textTail: run.textTail, stderrTail: run.stderrTail, terminal: !WORKING.has(run.state),
-  };
 }

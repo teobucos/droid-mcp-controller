@@ -1,9 +1,7 @@
-// Durable controller state: single-owner lock, atomic writes, versioned
-// migration with a retained byte-identical backup, and fail-closed recovery.
-import { mkdirSync, readFileSync, writeFileSync, openSync, closeSync, fsyncSync, renameSync, unlinkSync, rmSync, realpathSync, existsSync, statSync, copyFileSync, constants } from 'node:fs';
+// Durable session state: single-owner lock, atomic writes and fail-closed recovery.
+import { mkdirSync, readFileSync, writeFileSync, openSync, closeSync, fsyncSync, renameSync, unlinkSync, rmSync, realpathSync, existsSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { hostname, homedir } from 'node:os';
-import { randomUUID, createHash } from 'node:crypto';
 import { z } from 'zod';
 
 const levels = ['off', 'low', 'medium', 'high'];
@@ -22,8 +20,8 @@ const baseRun = z.object({
   droidSessionId: z.string().uuid().nullable(),
   state: z.enum(RUN_STATES),
   events: z.array(z.object({ type: z.string() }).passthrough()), textTail: z.string(), stderrTail: z.string(),
-  replyHandles: z.array(z.string()).optional(),
-  replyRouteId: z.string().uuid().optional(),
+  replyHandles: z.array(z.string()),
+  replyRouteId: z.string().uuid(),
 }).passthrough();
 const identity = { host: z.string(), home: z.string(), factoryHomeOverride: z.string().nullable() };
 const sessionRecord = z.object({
@@ -31,11 +29,7 @@ const sessionRecord = z.object({
   workspace: z.string(), replyTo: z.string().nullable(), droidSessionId: z.string().uuid().nullable(), headRunId: z.string().uuid(),
   createdAt: z.string().datetime({ offset: true }), updatedAt: z.string().datetime({ offset: true }),
 }).strict();
-const persisted = z.discriminatedUnion('version', [
-  z.object({ version: z.literal(1), ...identity, runs: z.record(baseRun.extend({ prompt: z.string() })) }),
-  z.object({ version: z.literal(2), ...identity, runs: z.record(baseRun.extend({ prompt: z.never().optional() })), sessionHeads: z.record(z.string().uuid(), z.string().uuid()) }),
-  z.object({ version: z.literal(3), ...identity, nextSeq: z.number().int().min(1), runs: z.record(baseRun.extend({ sessionId: z.string().uuid(), prompt: z.never().optional() })), sessions: z.record(sessionRecord) }),
-]);
+const persisted = z.object({ version: z.literal(3), ...identity, nextSeq: z.number().int().min(1), runs: z.record(baseRun.extend({ sessionId: z.string().uuid(), prompt: z.never().optional() })), sessions: z.record(sessionRecord) });
 
 // Write, sync, then replace: readers see an entire old or entire new record.
 export function atomicJson(path, data) {
@@ -61,63 +55,6 @@ export const completeResult = (result) => ['success', 'interrupted', 'error_duri
   && typeof result.durationMs === 'number' && typeof result.turnCount === 'number' && 'tokenUsage' in result;
 
 export const defaultTitle = (sessionId) => `Droid session ${sessionId.slice(0, 8)}`;
-
-// Published hash order: 98e0e7 stored host reasoning outside the five-field
-// intent; 7b4a816 added optional reasoning and routing to that same intent.
-export function legacyFingerprint({ workspace, prompt, autonomy, model, parentRunId, reasoningEffort, puckConversationId }, version) {
-  return createHash('sha256').update(JSON.stringify({ workspace, prompt, autonomy, model: model ?? null, parentRunId: parentRunId ?? null,
-    ...(version === 2 ? { ...(reasoningEffort ? { reasoningEffort } : {}), ...(puckConversationId ? { puckConversationId } : {}) } : {}) })).digest('hex');
-}
-
-// v1 -> v2: prompts are never retained; heads follow acceptance time.
-function toV2(state) {
-  state.sessionHeads = {};
-  // Stable sort: equal timestamps retain durable insertion/acceptance order.
-  for (const run of Object.values(state.runs).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))) {
-    if (run.droidSessionId) state.sessionHeads[run.droidSessionId] = run.runId;
-    // Prove the format while the original prompt still exists. Unknown hashes
-    // must not gain a legacy fallback simply because their state was v1.
-    run.fingerprintVersion = run.fingerprint === legacyFingerprint(run, 2) ? 2
-      : !run.puckConversationId && run.fingerprint === legacyFingerprint(run, 1) ? 1 : 0;
-    delete run.prompt;
-  }
-  state.version = 2;
-}
-
-// v2 -> v3: group runs by Droid session into controller sessions. A run that
-// never obtained a Droid session UUID is its own session. Recorded routing is
-// preserved as that session's replyTo; nothing is retargeted.
-function toV3(state) {
-  for (const run of Object.values(state.runs)) {
-    for (const key of ['updatedAt', 'finishedAt']) if (run[key] !== undefined && !Number.isFinite(Date.parse(run[key]))) throw new Error(`Corrupt state: invalid ${key} on a run`);
-  }
-  const sessions = {};
-  const byDroid = new Map();
-  let seq = 1;
-  for (const run of Object.values(state.runs).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))) {
-    let session = run.droidSessionId ? byDroid.get(run.droidSessionId) : undefined;
-    if (!session) {
-      const sessionId = randomUUID();
-      session = { sessionId, seq: seq++, title: defaultTitle(sessionId), labels: [], archived: false, workspace: run.workspace, replyTo: null, droidSessionId: run.droidSessionId, headRunId: run.runId, createdAt: run.createdAt, updatedAt: run.createdAt };
-      sessions[sessionId] = session;
-      if (run.droidSessionId) byDroid.set(run.droidSessionId, session);
-    }
-    run.sessionId = session.sessionId;
-    run.fingerprintVersion ??= 2; // Prompt-free v2 cannot distinguish the two historical hashes yet.
-    run.replyTo = run.puckConversationId ?? null;
-    delete run.puckConversationId;
-    run.preview = run.textTail.slice(-4000);
-    if (run.droidSessionId || run.result) run.submittedAt = run.createdAt; // legacy approximation, not proof of submission
-    session.headRunId = state.sessionHeads[run.droidSessionId] ?? run.runId;
-    session.updatedAt = run.updatedAt ?? run.createdAt;
-  }
-  // The head (validated before migration) decides the session's recorded routing.
-  for (const session of Object.values(sessions)) session.replyTo = state.runs[session.headRunId].replyTo;
-  state.sessions = sessions;
-  state.nextSeq = seq;
-  delete state.sessionHeads;
-  state.version = 3;
-}
 
 export function openStore(config) {
   mkdirSync(config.stateDirectory, { recursive: true, mode: 0o700 });
@@ -146,27 +83,11 @@ export function openStore(config) {
     if (state.host !== hostname() || state.home !== homedir() || state.factoryHomeOverride !== factoryHomeOverride) {
       throw new Error('Invalid state or state belongs to another host/HOME; do not reset it');
     }
-    const loadedVersion = state.version;
     const keys = new Set();
     for (const run of Object.values(state.runs)) {
       if (!Number.isFinite(Date.parse(run.createdAt))) throw new Error('Corrupt state: invalid createdAt on a run');
       if (keys.has(run.requestKey)) throw new Error('Corrupt state: duplicate requestKey');
       keys.add(run.requestKey);
-    }
-    if (state.version === 1) toV2(state);
-    if (state.version === 2) {
-      for (const [sessionId, headId] of Object.entries(state.sessionHeads)) {
-        if (state.runs[headId]?.droidSessionId !== sessionId) throw new Error('Corrupt state: session head missing or belongs to another session');
-      }
-      for (const run of Object.values(state.runs)) {
-        if (run.droidSessionId && !state.sessionHeads[run.droidSessionId]) throw new Error('Corrupt state: missing session head');
-      }
-      toV3(state);
-      persisted.parse(state); // The candidate must itself be valid before anything is written.
-      // Validated: keep the pre-migration bytes next to the new state, never overwriting a backup.
-      let backup = `${statePath}.v${loadedVersion}.bak`;
-      if (existsSync(backup)) backup = `${backup}.${Date.now()}`; // never overwrite, never skip: this file is THIS migration's preimage
-      { copyFileSync(statePath, backup, constants.COPYFILE_EXCL); const fd = openSync(backup, 'r'); try { fsyncSync(fd); } finally { closeSync(fd); } }
     }
     const seqs = new Set();
     for (const session of Object.values(state.sessions)) {

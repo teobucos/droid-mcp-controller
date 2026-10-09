@@ -1,5 +1,9 @@
 # Verification of review code 20b31df
 
+Historical evidence for the linked revision, not the current API contract.
+The six run tools, migration paths and compatibility tests described below have
+since been removed. See TOOLS.md and CUTOVER.md for current behavior.
+
 Code under review: [20b31dfec8712750de7d81ce79177a607f31066c](https://github.com/teobucos/droid-mcp-controller/commit/20b31dfec8712750de7d81ce79177a607f31066c),
 on top of [ee240db78fff56561f89c78874eabdf9b0e6d70d](https://github.com/teobucos/droid-mcp-controller/commit/ee240db78fff56561f89c78874eabdf9b0e6d70d).
 Base main: [c76dee2ccbd2b1173ca96abba671a2636f0c3df6](https://github.com/teobucos/droid-mcp-controller/commit/c76dee2ccbd2b1173ca96abba671a2636f0c3df6).
