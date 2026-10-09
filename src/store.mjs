@@ -3,7 +3,7 @@
 import { mkdirSync, readFileSync, writeFileSync, openSync, closeSync, fsyncSync, renameSync, unlinkSync, rmSync, realpathSync, existsSync, statSync, copyFileSync, constants } from 'node:fs';
 import { join } from 'node:path';
 import { hostname, homedir } from 'node:os';
-import { randomUUID } from 'node:crypto';
+import { randomUUID, createHash } from 'node:crypto';
 import { z } from 'zod';
 
 const levels = ['off', 'low', 'medium', 'high'];
@@ -60,12 +60,23 @@ export const completeResult = (result) => ['success', 'interrupted', 'error_duri
 
 export const defaultTitle = (sessionId) => `Droid session ${sessionId.slice(0, 8)}`;
 
+// Published hash order: 98e0e7 stored host reasoning outside the five-field
+// intent; 7b4a816 added optional reasoning and routing to that same intent.
+export function legacyFingerprint({ workspace, prompt, autonomy, model, parentRunId, reasoningEffort, puckConversationId }, version) {
+  return createHash('sha256').update(JSON.stringify({ workspace, prompt, autonomy, model: model ?? null, parentRunId: parentRunId ?? null,
+    ...(version === 2 ? { ...(reasoningEffort ? { reasoningEffort } : {}), ...(puckConversationId ? { puckConversationId } : {}) } : {}) })).digest('hex');
+}
+
 // v1 -> v2: prompts are never retained; heads follow acceptance time.
 function toV2(state) {
   state.sessionHeads = {};
   // Stable sort: equal timestamps retain durable insertion/acceptance order.
   for (const run of Object.values(state.runs).sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt))) {
     if (run.droidSessionId) state.sessionHeads[run.droidSessionId] = run.runId;
+    // Prove the format while the original prompt still exists. Unknown hashes
+    // must not gain a legacy fallback simply because their state was v1.
+    run.fingerprintVersion = run.fingerprint === legacyFingerprint(run, 2) ? 2
+      : !run.puckConversationId && run.fingerprint === legacyFingerprint(run, 1) ? 1 : 0;
     delete run.prompt;
   }
   state.version = 2;
@@ -90,7 +101,7 @@ function toV3(state) {
       if (run.droidSessionId) byDroid.set(run.droidSessionId, session);
     }
     run.sessionId = session.sessionId;
-    run.fingerprintVersion = 2; // v1/v2 aliases keep their original comparison contract.
+    run.fingerprintVersion ??= 2; // Prompt-free v2 cannot distinguish the two historical hashes yet.
     run.replyTo = run.puckConversationId ?? null;
     delete run.puckConversationId;
     run.preview = run.textTail.slice(-4000);

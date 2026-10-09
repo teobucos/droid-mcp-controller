@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
 import { approvedWorkspace, pathsOverlap, contains } from './config.mjs';
 import { ToolError } from './errors.mjs';
-import { openStore, atomicJson, defaultTitle, resultState, LIVE, WORKING } from './store.mjs';
+import { openStore, atomicJson, defaultTitle, resultState, legacyFingerprint, LIVE, WORKING } from './store.mjs';
 import { sessionStatus, isWorking, resultMessages, noticeMessage, turnNotices, legacyRun } from './views.mjs';
 
 const levels = ['off', 'low', 'medium', 'high'];
@@ -123,13 +123,18 @@ export class Controller {
       replyTo, interrupt: Boolean(intent.interrupt), title: intent.title ?? null, labels, continuesRun: intent.guard?.headRunId ?? null,
     });
     if (dup) {
-      // v1/v2 fingerprint order is a wire contract. Only legacy aliases may
-      // compare it; new titles/labels/steering cannot be silently discarded.
-      // parentRunId also identifies already-migrated v3 legacy records.
-      const legacyFingerprint = (intent.legacy || intent.guard) && (dup.fingerprintVersion === 2 || Object.hasOwn(dup, 'parentRunId'))
-        ? sha({ workspace, prompt: intent.prompt, autonomy, model: intent.model ?? null, parentRunId: intent.guard?.headRunId ?? null,
-          ...(reasoningEffort ? { reasoningEffort } : {}), ...(replyTo ? { puckConversationId: replyTo } : {}) }) : null;
-      if (dup.fingerprint !== fingerprint && dup.fingerprint !== legacyFingerprint) throw new ToolError('request_key_conflict', 'requestKey was already used with different arguments');
+      // Only legacy aliases may compare the published hashes. Unknown raw-v1
+      // hashes (version 0) and modern caller options never gain that fallback.
+      const legacy = (intent.legacy || intent.guard) && intent.title === undefined && !labels.length && !intent.interrupt
+        && ([1, 2].includes(dup.fingerprintVersion) || (dup.fingerprintVersion === undefined && Object.hasOwn(dup, 'parentRunId')));
+      const historical = { workspace, prompt: intent.prompt, autonomy, model: intent.model, parentRunId: intent.guard?.headRunId ?? null, reasoningEffort, puckConversationId: replyTo };
+      const later = legacy && dup.fingerprintVersion !== 1 && dup.fingerprint === legacyFingerprint(historical, 2);
+      // Prompt-free v2/old-v3 records cannot be classified at startup. A matching
+      // five-field candidate is safe only without ANY new per-turn reasoning or
+      // routing: 98e0e7 supported neither. Never ignore a modern caller option.
+      const original = legacy && intent.reasoningEffort === undefined && !replyTo && !dup.replyTo
+        && dup.fingerprint === legacyFingerprint(historical, 1);
+      if (dup.fingerprint !== fingerprint && !later && !original) throw new ToolError('request_key_conflict', 'requestKey was already used with different arguments');
       return dup;
     }
     if (levels.indexOf(autonomy) > levels.indexOf(this.config.maxAutonomy)) throw new ToolError('autonomy_exceeds_ceiling', `Requested autonomy exceeds configured maxAutonomy (${this.config.maxAutonomy})`);
