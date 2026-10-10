@@ -8,36 +8,36 @@ Errors use MCP `isError` with `{"error": {code, message, retryable, action}}`. S
 
 ### `droid_create_session`
 
-Create a Droid session in an approved local workspace and start its first turn. Use it to delegate a new task; use droid_send_message for follow-ups and droid_wait_for_sessions to join work. Returns immediately with the session status (agentState, metadata, preview, latestRun, notification); latestRun.state is queued while capacity or a workspace lock is busy, and the task is submitted only when it starts. model must be an id from droid_models and replyTo is required: a Puck conversation id (T-...) gives the agent a reply-back route, null means detached work; no recipient is ever inferred. Autonomy defaults to the host default (see droid_list_workspaces); use off for read-only work. Example: {requestKey:'review-42', workspace:'/approved/repo', prompt:'Review the diff and report findings.', model:'MODEL_ID', autonomy:'off', replyTo:'T-...', title:'Diff review', labels:['review']}. Reuse requestKey only with identical arguments. Rejects with an actionable code for unapproved workspaces, unknown models, unsupported reasoning, autonomy above the ceiling, and replyTo when reply-back is not configured. Local workspaces only: no remote executors or automatic worktrees.
+Create a Droid session in an approved local workspace and start its first turn. Use it to delegate a new task; use droid_send_message for follow-ups and droid_wait_for_sessions to join work. Returns immediately with the session status (agentState, metadata, preview, latestRun, notification); latestRun.state is queued while capacity or a workspace lock is busy, and the task is submitted only when it starts. replyTo is required: a Puck conversation id (T-...) gives the agent a reply-back route, null means detached work that never needs Amp; no recipient is ever inferred. model is optional: omit it to use the host defaultModel (policy.defaultModel in droid_list_workspaces, validated against the live catalog and never a Fast variant), or pass an id from droid_models. Autonomy and reasoning default to the host policy; use autonomy off for read-only work. latestRun reports the effective model, autonomy and reasoning. Example: {requestKey:'review-42', workspace:'/approved/repo', prompt:'Review the diff and report findings.', replyTo:null, autonomy:'off', title:'Diff review', labels:['review']}. Reuse requestKey only with identical arguments; a replay returns the original acceptance and its original settings even if host defaults changed. Rejects with an actionable code for unapproved workspaces (new projects need one-time operator approval), model_required when no model or host default exists, unknown models, unsupported reasoning, autonomy above the ceiling, and replyTo when reply-back is not configured. Local workspaces only: no remote executors or automatic worktrees.
 
 **Input**
 
 - `requestKey` (required): string; Idempotency key. Reuse it only with exactly the same arguments; it is global to this controller.
 - `workspace` (required): string; Absolute path inside an approved root (see droid_list_workspaces).
 - `prompt` (required): string
-- `model` (required): string; A model id from droid_models, chosen explicitly for this turn.
+- `model`: string; Model id from droid_models. Omitted: the host defaultModel; rejected with model_required when none is configured.
 - `replyTo` (required): string | null; Puck conversation id to report to, or null for detached work. Required; never defaulted.
 - `title`: string
 - `labels`: array; Lowercase labels for droid_find_sessions.
-- `reasoningEffort`: string; one of `off`, `none`, `dynamic`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; Independent of autonomy. Must be supported by the chosen model; defaults to the host setting.
-- `autonomy`: string; one of `off`, `low`, `medium`, `high`; off = read-only Spec mode; low|medium|high = Auto at that level. Defaults to the host default and is capped by the host ceiling.
+- `reasoningEffort`: string; one of `off`, `none`, `dynamic`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; Independent of autonomy. An explicit value must be supported by the selected model. Omitted: the host reasoningEffort if the model supports it, otherwise the model's live default.
+- `autonomy`: string; one of `off`, `low`, `medium`, `high`; off = read-only Spec mode; low|medium|high = Auto at that level. An explicit value above the host ceiling is rejected. Omitted: the host defaultAutonomy.
 
 **Output**: JSON object with `agentState`, `metadata`, `preview`, `latestRun`, `notification`
 
 ### `droid_send_message`
 
-Send a follow-up to a Droid session, or steer it. Returns immediately with runId, disposition (started | queued | interrupting) and the session status. An idle session starts the message at once. A busy session queues it after the current turn by default (interrupt:false), so unlike Puck's Amp thread messages this does not interrupt by default; mid-run steering needs interrupt:true. interrupt:true durably supersedes older queued turns on this session (cancelled with code superseded), interrupts the active turn, waits for process cleanup and workspace admission, then runs your message in the same Droid session. It is not native in-flight injection, and interrupted tool side effects are not undone. Choose model explicitly for every turn. Example: {session:'SESSION_ID', requestKey:'review-42-next', message:'Focus on authorization errors.', model:'MODEL_ID'}; steering: add interrupt:true. replyTo is optional: omit it to keep the session recipient, pass a Puck conversation id to retarget, or null to detach. A normal message restores an archived session. Duplicate requestKeys return the original acceptance; changed intent, an unknown outcome (controller crashed mid-turn), too many queued turns and invalid settings reject with an actionable code. Queued messages live in memory and are not replayed after a controller restart.
+Send a follow-up to a Droid session, or steer it. Returns immediately with runId, disposition (started | queued | interrupting) and the session status. An idle session starts the message at once. A busy session queues it after the current turn by default (interrupt:false), so unlike Puck's Amp thread messages this does not interrupt by default; mid-run steering needs interrupt:true. interrupt:true durably supersedes older queued turns on this session (cancelled with code superseded), interrupts the active turn, waits for process cleanup and workspace admission, then runs your message in the same Droid session. It is not native in-flight injection, and interrupted tool side effects are not undone. Omitted model and autonomy inherit the session's last accepted turn (including queued work), with autonomy capped at the current ceiling; omitted reasoning follows the same-model rule on reasoningEffort; the status latestRun reports the effective settings. Pass a value only to change it. Example: {session:'SESSION_ID', requestKey:'review-42-next', message:'Focus on authorization errors.'}; steering: add interrupt:true. replyTo is optional: omit it to keep the session recipient, pass a Puck conversation id to retarget, or null to detach. A normal message restores an archived session. Duplicate requestKeys return the original acceptance; changed intent, an unknown outcome (controller crashed mid-turn), too many queued turns, unknown models, unsupported explicit reasoning and explicit autonomy above the ceiling reject with an actionable code (never a silent downgrade). Queued messages live in memory and are not replayed after a controller restart.
 
 **Input**
 
 - `session` (required): string; Session handle from droid_create_session or droid_find_sessions.
 - `requestKey` (required): string; Idempotency key. Reuse it only with exactly the same arguments; it is global to this controller.
 - `message` (required): string
-- `model` (required): string; A model id from droid_models, chosen explicitly for this turn.
+- `model`: string; Model id from droid_models. Omitted: the session's last accepted model (not the host default).
 - `interrupt`: boolean; default false; false (default) queues after the current turn; true supersedes older queued turns and interrupts the active turn first.
 - `replyTo`: string | null
-- `reasoningEffort`: string; one of `off`, `none`, `dynamic`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; Independent of autonomy. Must be supported by the chosen model; defaults to the host setting.
-- `autonomy`: string; one of `off`, `low`, `medium`, `high`; off = read-only Spec mode; low|medium|high = Auto at that level. Defaults to the host default and is capped by the host ceiling.
+- `reasoningEffort`: string; one of `off`, `none`, `dynamic`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; Independent of autonomy. An explicit value must be supported by the selected model. Omitted: the session's last effort when the model is unchanged and still supports it, otherwise the host reasoningEffort if the model supports it, otherwise the model's live default.
+- `autonomy`: string; one of `off`, `low`, `medium`, `high`; off = read-only Spec mode; low|medium|high = Auto at that level. An explicit value above the host ceiling is rejected. Omitted: the session's last accepted autonomy, capped at the current ceiling (never raised to the host default).
 
 **Output**: JSON object with `runId`, `disposition`, `status`
 
@@ -129,7 +129,7 @@ Get token usage for one Droid session, or for every controller turn when session
 
 ### `droid_list_workspaces`
 
-List this controller's approved local workspace roots, execution capacity and launch policy. Use it before creating work. Example: {}. Returns workspaces (the roots; a launch restriction, not an OS sandbox), capacity {maximum, active, queued, available} and policy {defaultAutonomy, maxAutonomy, reasoningEffort, replyBack}. A free slot does not skip workspace locks: a writer (autonomy above off) needs its whole canonical tree to itself, readers (off) may share, and conflicting turns queue FIFO. Execution is local to this host: no orbs, remote machines or other runners.
+List this controller's approved local workspace roots, execution capacity and launch policy. Use it before creating work. Example: {}. Returns workspaces (the roots; a launch restriction, not an OS sandbox), capacity {maximum, active, queued, available} and policy {defaultModel, defaultAutonomy, maxAutonomy, reasoningEffort, replyBack}. A free slot does not skip workspace locks: a writer (autonomy above off) needs its whole canonical tree to itself, readers (off) may share, and conflicting turns queue FIFO. Execution is local to this host: no orbs, remote machines or other runners.
 
 **Input**
 
@@ -139,7 +139,7 @@ _none_
 
 ### `droid_models`
 
-List the models currently available to this controller's authenticated Factory account and organization. Use a returned id explicitly for every created or continued turn; never guess ids from CLI help or old sessions. Example: {}. Returns fetchedAt and models excluding disabled:true and deprecated:true, with reasoning, lifecycle and media metadata only when Factory supplies them. Missing deprecated metadata means lifecycle is unknown, not proven non-legacy. Concurrent calls share one bounded cache refresh and no task prompt is submitted. A failed refresh returns model_discovery_failed, never an expired catalog presented as current. Pricing is never fabricated.
+List the models currently available to this controller's authenticated Factory account and organization. Pass a returned id as model to choose or change a model (omitted, create uses the host defaultModel and send keeps the session model); never guess ids from CLI help or old sessions. Example: {}. Returns fetchedAt and models excluding disabled:true and deprecated:true, with reasoning, lifecycle and media metadata only when Factory supplies them. Missing deprecated metadata means lifecycle is unknown, not proven non-legacy. Concurrent calls share one bounded cache refresh and no task prompt is submitted. A failed refresh returns model_discovery_failed, never an expired catalog presented as current. Pricing is never fabricated.
 
 **Input**
 

@@ -50,7 +50,12 @@ Compare state and results with the backup before creating acceptance work.
 - Refresh the connected client's MCP catalog. Puck independently retests the
   connected MCP; local HTTP alone is not proof of public/cloud acceptance.
 - If a routed check is needed, use the actual requesting Puck conversation.
-  Existing credentials need no new sign-in for this source-only deployment.
+- Detached work (`replyTo:null`) never contacts Amp and needs no Amp sign-in.
+  Routed reply-back uses `https://ampcode.com/mcp?profile=puck`. Factory stores Amp
+  OAuth per exact URL, so a host previously signed in only for an older profile URL
+  needs one supported owner sign-in (`scripts/amp-signin.mjs`) for the current URL
+  before routed sessions can pass preflight; until then they fail before any prompt
+  with an `amp_mcp_*` code.
 
 ## Rollback
 

@@ -3,9 +3,9 @@ import { randomUUID } from 'node:crypto';
 import { approvedWorkspace } from './config.mjs';
 import { PUCK_TOOL, replyHandlesFromContent } from './puck.mjs';
 
-// Default deny: only puck is wanted from the Amp endpoint. Observed live, the thread-free
-// external-agent endpoint also offers manage_amp (admin) and find_thread/read_thread (read other
-// Amp threads); these are denied up front. The preflight then lists what the server really
+// Default deny: only puck is wanted from the Amp endpoint. The earlier thread-free profile was
+// observed live to also offer manage_amp (admin) and find_thread/read_thread (read other Amp
+// threads); these stay denied up front whatever the current profile exposes. The preflight then lists what the server really
 // exposes, denies every other tool it finds (so a NEW Amp tool is blocked automatically) and
 // verifies none remains usable; if that cannot be achieved the run fails closed. This is
 // client-side filtering, not credential scoping.

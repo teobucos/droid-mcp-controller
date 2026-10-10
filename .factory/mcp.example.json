@@ -2,7 +2,7 @@
   "mcpServers": {
     "amp-puck": {
       "type": "http",
-      "url": "https://ampcode.com/mcp?profile=external-agent",
+      "url": "https://ampcode.com/mcp?profile=puck",
       "oauth": { "resource": "https://ampcode.com/mcp" },
       "disabledTools": ["manage_amp"]
     }

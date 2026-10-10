@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { describeError, toolFailure } from './errors.mjs';
 import { defineTools } from './tools.mjs';
@@ -12,8 +13,10 @@ class PuckMcpServer extends McpServer {
   }
 }
 
+export const SERVER_VERSION = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version;
+
 export function createMcp(controller, models) {
-  const server = new PuckMcpServer({ name: 'droid-controller', version: '0.2.0' });
+  const server = new PuckMcpServer({ name: 'droid-mcp', version: SERVER_VERSION });
   for (const tool of defineTools(controller, models)) {
     server.registerTool(tool.name, {
       description: tool.description, inputSchema: tool.input, ...(tool.output ? { outputSchema: tool.output } : {}),

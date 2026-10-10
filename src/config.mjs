@@ -5,7 +5,12 @@ import { ToolError } from './errors.mjs';
 
 export const autonomy = z.enum(['off', 'low', 'medium', 'high']);
 export const reasoning = z.enum(['off', 'none', 'dynamic', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max']);
-export const AMP_MCP_URL = 'https://ampcode.com/mcp?profile=external-agent';
+// Current Amp contract: any other profile returns HTTP 400 "Unknown MCP profile;
+// expected one of: puck", and Factory stores OAuth per exact URL.
+export const AMP_MCP_URL = 'https://ampcode.com/mcp?profile=puck';
+// Name-based heuristic (ids like *-fast, display names like "... Fast Mode"); the
+// catalog has no authoritative tier field. Used only to refuse automatic defaults.
+export const looksFast = (text) => /(^|[^a-z0-9])fast([^a-z0-9]|$)/i.test(text ?? '');
 const absolute = z.string().refine(isAbsolute, 'Use an absolute path (expand ~ yourself)');
 const schema = z.object({
   approvedDirectories: z.array(absolute).min(1),
@@ -18,6 +23,7 @@ const schema = z.object({
   maxAutonomy: autonomy.default('high'),
   defaultAutonomy: autonomy.optional(),
   reasoningEffort: reasoning.optional(),
+  defaultModel: z.string().min(1).max(200).refine((id) => !looksFast(id), 'defaultModel must be a standard model, not a Fast variant; callers can still choose a Fast model explicitly').optional(),
   maxConcurrentRuns: z.number().int().min(1).max(16).default(4),
   runTimeoutMs: z.number().int().min(1000).max(86400000).default(3600000),
   cancelGraceMs: z.number().int().min(100).max(30000).default(5000),
@@ -25,11 +31,9 @@ const schema = z.object({
   // Reply-back is opt-in. The endpoint is generic: it names no thread and no
   // recipient. Recipients are chosen per session (replyTo) and never defaulted.
   ampMcp: z.object({
-    url: z.string().url().default(AMP_MCP_URL).refine((value) => {
-      const url = new URL(value);
-      return url.origin === 'https://ampcode.com' && !url.username && !url.password && url.pathname === '/mcp' && !url.hash
-        && url.searchParams.get('profile') === 'external-agent' && [...url.searchParams.keys()].every((key) => key === 'profile');
-    }, `ampMcp.url must be exactly ${AMP_MCP_URL}: credential-free and not bound to any thread (no threadID)`),
+    // Exact match: no other profile, extra parameter, thread binding or alias is accepted.
+    url: z.string().url().default(AMP_MCP_URL).refine((value) => value === AMP_MCP_URL,
+      `ampMcp.url must be exactly ${AMP_MCP_URL} (the current Amp MCP profile): credential-free and not bound to any thread (no threadID); omit it to use that value`),
   }).strict().optional(),
 }).strict().transform((config) => ({ ...config, defaultAutonomy: config.defaultAutonomy ?? config.maxAutonomy }))
   .refine((config) => autonomy.options.indexOf(config.defaultAutonomy) <= autonomy.options.indexOf(config.maxAutonomy), 'defaultAutonomy cannot exceed maxAutonomy');
