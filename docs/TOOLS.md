@@ -13,12 +13,12 @@ Create a Droid session in an approved local workspace and start its first turn. 
 **Input**
 
 - `requestKey` (required): string; Idempotency key. Reuse it only with exactly the same arguments; it is global to this controller.
-- `workspace` (required): string; Absolute path inside an approved root (see droid_list_workspaces).
+- `workspace` (required): string; Absolute path of a root returned by droid_list_workspaces, or a subdirectory or git worktree inside one.
 - `prompt` (required): string
 - `model`: string; Model id from droid_models. Omitted: the host defaultModel; rejected with model_required when none is configured.
 - `replyTo` (required): string | null; Puck conversation id to report to, or null for detached work. Required; never defaulted.
-- `title`: string
-- `labels`: array; Lowercase labels for droid_find_sessions.
+- `title`: string; Also set as the Factory session title after the first turn (best effort).
+- `labels`: array; Lowercase labels for droid_find_sessions; also sent as Factory session tags at creation.
 - `reasoningEffort`: string; one of `off`, `none`, `dynamic`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`; Independent of autonomy. An explicit value must be supported by the selected model. Omitted: the host reasoningEffort if the model supports it, otherwise the model's live default.
 - `autonomy`: string; one of `off`, `low`, `medium`, `high`; off = read-only Spec mode; low|medium|high = Auto at that level. An explicit value above the host ceiling is rejected. Omitted: the host defaultAutonomy.
 
@@ -94,7 +94,7 @@ Find Droid sessions with text and typed filters, newest created first. Returns s
 
 ### `droid_update_session`
 
-Update a Droid session's title, labels or archive state and return its status. Change only metadata the owner asked for. Example: {session:'SESSION_ID', title:'Authorization review', labels:{add:['review'], remove:['draft']}}. Label changes are incremental; archived:true hides the session from droid_find_sessions without deleting anything and archived:false restores it. Does not cancel work, change routing or alter model settings. An empty update, conflicting labels, more than 20 labels and archiving a session with queued or running turns reject.
+Update a Droid session's title, labels or archive state and return its status. Change only metadata the owner asked for. Example: {session:'SESSION_ID', title:'Authorization review', labels:{add:['review'], remove:['draft']}}. Label changes are incremental; archived:true hides the session from droid_find_sessions without deleting anything and archived:false restores it. A new title is applied to the Factory session title after the session's next turn (best effort; this call never starts Droid); later label changes stay controller metadata because Factory tags are set only at creation. Does not cancel work, change routing or alter model settings. An empty update, conflicting labels, more than 20 labels and archiving a session with queued or running turns reject.
 
 **Input**
 
@@ -129,7 +129,7 @@ Get token usage for one Droid session, or for every controller turn when session
 
 ### `droid_list_workspaces`
 
-List this controller's approved local workspace roots, execution capacity and launch policy. Use it before creating work. Example: {}. Returns workspaces (the roots; a launch restriction, not an OS sandbox), capacity {maximum, active, queued, available} and policy {defaultModel, defaultAutonomy, maxAutonomy, reasoningEffort, replyBack}. A free slot does not skip workspace locks: a writer (autonomy above off) needs its whole canonical tree to itself, readers (off) may share, and conflicting turns queue FIFO. Execution is local to this host: no orbs, remote machines or other runners.
+List this controller's approved local workspace roots, execution capacity and launch policy. Use it before creating work to choose a project: pass one returned root, or a subdirectory or git worktree inside one, as workspace. Any other path rejects with workspace_not_approved and needs one-time operator approval. Example: {}. Returns workspaces (the roots; a launch restriction, not an OS sandbox), capacity {maximum, active, queued, available} and policy {defaultModel, defaultAutonomy, maxAutonomy, reasoningEffort, replyBack}. A free slot does not skip workspace locks: a writer (autonomy above off) needs its whole canonical tree to itself, readers (off) may share, and conflicting turns queue FIFO. Execution is local to this host: no orbs, remote machines or other runners.
 
 **Input**
 

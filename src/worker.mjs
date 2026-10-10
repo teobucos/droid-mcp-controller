@@ -123,6 +123,7 @@ process.on('message', async (msg) => {
   if (started || !msg.run) return;
   started = true;
   const { run, prompt, config } = msg;
+  const factory = msg.factory ?? {};
   const routed = Boolean(run.replyTo && config.amp);
   let terminal;
   let failure;
@@ -213,7 +214,9 @@ process.on('message', async (msg) => {
         return { cancelled: true, answers: [] };
       },
     };
-    session = run.droidSessionId ? await resumeSession(run.droidSessionId, options) : await createSession({ ...options, cwd: run.workspace, ...settings });
+    // Tags exist only at creation in SDK 0.9.1; the SDK appends its own `sdk` tag.
+    session = run.droidSessionId ? await resumeSession(run.droidSessionId, options)
+      : await createSession({ ...options, cwd: run.workspace, ...settings, ...(factory.tags?.length ? { tags: factory.tags } : {}) });
     if (run.droidSessionId && session.id !== run.droidSessionId) throw new Error('Resumed session UUID mismatch');
     // Observe on receipt, before a following permission RPC can be dispatched.
     // Reading the async stream alone races result -> read_reply in one batch.
@@ -263,6 +266,16 @@ Always call the puck tool directly even in Spec mode; never call ExitSpecMode me
       }
     }
     if (!terminal) throw new Error('Stream ended without a terminal Droid result');
+    // After the turn, so Droid's generated title cannot replace it. Bounded and
+    // best-effort: the turn's outcome never depends on the dashboard title.
+    if (factory.title && !cancelled) {
+      try {
+        await withTimeout(session.rename({ title: factory.title }), config.titleTimeoutMs ?? 10000);
+        await send({ kind: 'title', state: 'applied', title: factory.title }).catch(() => {});
+      } catch (error) {
+        await send({ kind: 'title', state: 'failed', title: factory.title, error: String(error?.message ?? error) }).catch(() => {});
+      }
+    }
     await send({ kind: 'result', result: terminal });
   } catch (error) {
     failure = error.message;

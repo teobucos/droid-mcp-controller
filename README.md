@@ -198,6 +198,20 @@ Per task, Puck only calls `droid_create_session` with `requestKey`, an approved
 sessions never contact Amp, so they need no Amp authorization. An unapproved project
 fails with `workspace_not_approved`, whose action names the one-time setup.
 
+### Choosing a project
+
+Agents pick a project from the controller, not from memory:
+
+1. Call `droid_list_workspaces`. `workspaces` lists the approved roots (canonical
+   absolute paths) of this host's `approvedDirectories`.
+2. Pass one of those roots, or any existing subdirectory or Git worktree inside one,
+   as `workspace` to `droid_create_session`. Symlinks are resolved first; a path that
+   resolves outside every root is rejected.
+3. Follow-ups use the session handle; the workspace stays fixed for the session.
+
+Adding a project root is an operator change to the private host config, effective at
+the next controller-only restart. Agents never edit it.
+
 Isolation: writer turns hold a lock on their whole canonical workspace tree, so two
 sessions writing the same tree run one after the other. For parallel writers, the
 operator provisions separate directories or Git worktrees **inside** an approved root
@@ -220,6 +234,17 @@ can map controller sessions to them from `sessions[*].droidSessionId` in the pri
 `state.json`. Registered-computer Remote Control (`droid computer register`,
 `droid daemon --remote-access`) is a different feature. It is not used or enabled here,
 and enabling it would let external clients bypass the controller's root locks.
+
+Titles and tags. A session created with an explicit `title` gets that title in Factory
+through SDK `rename()` after its first turn (renaming earlier would be replaced by
+Droid's generated title). A `droid_update_session` title change is applied after the
+session's next turn; the update itself never starts Droid outside admission. Sessions
+without a title keep Factory's generated title. Rename is bounded and best effort: a
+failure is logged to the controller's stderr and the run's events and retried on the
+next turn, and never changes the turn's outcome or request-key fingerprints. Labels
+are sent as Factory session tags at creation, beside the SDK's own `sdk` tag (a label
+named `sdk` merges with it). SDK 0.9.1 has no tag update call, so later label changes
+stay controller metadata. Whether the Factory web app displays these tags is unverified.
 
 ## Droid reports and questions use the actual Amp MCP
 
@@ -461,6 +486,7 @@ capacity queueing, overlapping-workspace serialization (both lock directions,
 symlinks, FIFO fairness), mixed autonomy, concurrent reply-back with per-session
 recipients, misroute detection, cancel/steer isolation, Amp MCP preflight failures,
 launch defaults and follow-up inheritance (`test/settings-defaults.test.mjs`),
+Factory title and tag sync (`test/factory-title.test.mjs`),
 removed-tool rejection, unsupported-state refusal, crash fail-closed and queue loss. See `test/README.md`.
 `test/review-regressions.test.mjs` and `test/worker-ack.test.mjs` additionally test
 durable queue supersession, persistence ACK fault boundaries, per-run reply handles,

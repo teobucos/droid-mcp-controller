@@ -86,6 +86,18 @@ catalog or ceiling. It also pins the current Amp contract (`profile=puck` only) 
 that detached sessions never touch Amp. Mutating the controller to each of these
 wrong behaviors makes the suite fail.
 
+## Factory title and tag failure cases
+
+`test/factory-title.test.mjs` was written before the implementation and run to fail
+first. It distinguishes: an explicit title never reaching Factory, or renamed before
+the first turn (Droid's generated title would replace it); renaming on every turn or
+for untitled sessions; `droid_update_session` starting Droid outside admission or the
+new title never propagating on the next resumed turn; a rename error or hang that
+fails the turn, raises attention, leaks raw SDK text or is not retried; title sync
+changing request-key fingerprints; and labels missing from creation-time tags or
+duplicating the SDK's `sdk` tag. Four source mutations (rename every turn, fatal
+rename failure, fingerprint from the current title, no tags) each fail the suite.
+
 ## Session surface failure cases
 
 `test/session-surface.test.mjs` was written before the implementation. Each case names a
