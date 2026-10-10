@@ -53,10 +53,10 @@ export function defineTools(controller, models) {
       "Example: {requestKey:'review-42', workspace:'/approved/repo', prompt:'Review the diff and report findings.', replyTo:null, autonomy:'off', title:'Diff review', labels:['review']}. " +
       'Reuse requestKey only with identical arguments; a replay returns the original acceptance and its original settings even if host defaults changed. Rejects with an actionable code for unapproved workspaces (new projects need one-time operator approval), model_required when no model or host default exists, unknown models, unsupported reasoning, autonomy above the ceiling, and replyTo when reply-back is not configured. Local workspaces only: no remote executors or automatic worktrees.',
       z.object({
-        requestKey, workspace: z.string().min(1).max(4096).describe('Absolute path inside an approved root (see droid_list_workspaces).'), prompt: text,
+        requestKey, workspace: z.string().min(1).max(4096).describe('Absolute path of a root returned by droid_list_workspaces, or a subdirectory or git worktree inside one.'), prompt: text,
         model: model.optional().describe('Model id from droid_models. Omitted: the host defaultModel; rejected with model_required when none is configured.'),
         replyTo: replyTo.nullable().describe('Puck conversation id to report to, or null for detached work. Required; never defaulted.'),
-        title: title.optional(), labels: labels.optional().describe('Lowercase labels for droid_find_sessions.'), ...settings('create'),
+        title: title.optional().describe('Also set as the Factory session title after the first turn (best effort).'), labels: labels.optional().describe('Lowercase labels for droid_find_sessions; also sent as Factory session tags at creation.'), ...settings('create'),
       }).strict(), statusShape,
       (args) => controller.create(args)),
 
@@ -104,6 +104,7 @@ export function defineTools(controller, models) {
     tool('droid_update_session',
       'Update a Droid session\'s title, labels or archive state and return its status. Change only metadata the owner asked for. ' +
       "Example: {session:'SESSION_ID', title:'Authorization review', labels:{add:['review'], remove:['draft']}}. Label changes are incremental; archived:true hides the session from droid_find_sessions without deleting anything and archived:false restores it. " +
+      'A new title is applied to the Factory session title after the session\'s next turn (best effort; this call never starts Droid); later label changes stay controller metadata because Factory tags are set only at creation. ' +
       'Does not cancel work, change routing or alter model settings. An empty update, conflicting labels, more than 20 labels and archiving a session with queued or running turns reject.',
       z.object({ session, title: title.optional(), archived: z.boolean().optional(), labels: z.object({ add: labels.optional(), remove: labels.optional() }).strict().optional() }).strict(),
       statusShape, (args) => controller.update(args)),
@@ -122,7 +123,7 @@ export function defineTools(controller, models) {
       (args) => controller.usage(args), true),
 
     tool('droid_list_workspaces',
-      'List this controller\'s approved local workspace roots, execution capacity and launch policy. Use it before creating work. ' +
+      'List this controller\'s approved local workspace roots, execution capacity and launch policy. Use it before creating work to choose a project: pass one returned root, or a subdirectory or git worktree inside one, as workspace. Any other path rejects with workspace_not_approved and needs one-time operator approval. ' +
       'Example: {}. Returns workspaces (the roots; a launch restriction, not an OS sandbox), capacity {maximum, active, queued, available} and policy {defaultModel, defaultAutonomy, maxAutonomy, reasoningEffort, replyBack}. ' +
       'A free slot does not skip workspace locks: a writer (autonomy above off) needs its whole canonical tree to itself, readers (off) may share, and conflicting turns queue FIFO. Execution is local to this host: no orbs, remote machines or other runners.',
       z.object({}).strict(),

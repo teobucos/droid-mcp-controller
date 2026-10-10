@@ -14,7 +14,7 @@ import { EventEmitter } from 'node:events';
 import { approvedWorkspace, pathsOverlap, contains, looksFast } from './config.mjs';
 import { ToolError } from './errors.mjs';
 import { openStore, atomicJson, defaultTitle, resultState, LIVE, WORKING } from './store.mjs';
-import { sessionStatus, isWorking, resultMessages, noticeMessage, turnNotices } from './views.mjs';
+import { sessionStatus, isWorking, resultMessages, noticeMessage, turnNotices, scrub } from './views.mjs';
 import { isReplyHandle } from './puck.mjs';
 
 const levels = ['off', 'low', 'medium', 'high'];
@@ -338,13 +338,32 @@ export class Controller {
     child.send({
       run: { runId: run.runId, sessionId: run.sessionId, workspace: run.workspace, autonomy: run.autonomy, model: run.model, reasoningEffort: run.reasoningEffort, droidSessionId: run.droidSessionId, replyTo: run.replyTo },
       replyHandles: this.replyHandlesFor(run),
+      factory: { title: this.pendingTitle(session), tags: session.droidSessionId ? [] : session.labels.map((name) => ({ name })) },
       prompt,
-      config: { droidPath: this.config.droidPath, approvedDirectories: this.config.approvedDirectories, reasoningEffort: this.config.reasoningEffort, amp: this.config.ampMcp ?? null, ackTimeoutMs: Math.min(this.config.runTimeoutMs, 30000) },
+      config: { droidPath: this.config.droidPath, approvedDirectories: this.config.approvedDirectories, reasoningEffort: this.config.reasoningEffort, amp: this.config.ampMcp ?? null, ackTimeoutMs: Math.min(this.config.runTimeoutMs, 30000), titleTimeoutMs: Math.min(10000, Math.floor(this.config.runTimeoutMs / 4)) },
     });
+  }
+
+  // Title sync is recorded on runs (passthrough records) rather than the strict
+  // session record, so state stays loadable by the previous release. Default
+  // titles are never pushed: Factory's generated title is more useful than them.
+  pendingTitle(session) {
+    const applied = this.runsOf(session.sessionId).findLast((run) => run.titleSync?.state === 'applied')?.titleSync.title ?? null;
+    if (session.title === applied) return null;
+    return applied !== null || session.title !== defaultTitle(session.sessionId) ? session.title : null;
   }
 
   message(run, msg) {
     if (msg.kind === 'stderr') run.stderrTail = (run.stderrTail + msg.text).slice(-16000);
+    else if (msg.kind === 'title') {
+      if (typeof msg.title !== 'string' || !['applied', 'failed'].includes(msg.state)) return;
+      run.titleSync = { state: msg.state, title: msg.title, ...(msg.state === 'failed' ? { error: scrub(String(msg.error ?? 'rename failed')).slice(0, 500) } : {}) };
+      run.events.push({ at: now(), type: msg.state === 'applied' ? 'title_synced' : 'title_sync_failed', ...(run.titleSync.error ? { message: run.titleSync.error } : {}) });
+      run.events = run.events.slice(-20);
+      if (msg.state === 'failed') console.error(`Factory title sync failed for run ${run.runId}: ${run.titleSync.error}`);
+      this.changed(run);
+      return;
+    }
     else if (msg.kind === 'reply_handles') {
       const entry = this.workers.get(run.runId);
       if (!run.droidSessionId || msg.droidSessionId !== run.droidSessionId
