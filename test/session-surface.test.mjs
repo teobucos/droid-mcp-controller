@@ -15,7 +15,7 @@ import { boot, stop, call, audit, readState, writeCatalog, sleep, token, root } 
 const PUCK = 'T-11111111-1111-4111-8111-111111111111';
 const PUCK2 = 'T-22222222-2222-4222-8222-222222222222';
 const PUCK3 = 'T-33333333-3333-4333-8333-333333333333';
-const AMP_URL = 'https://ampcode.com/mcp?profile=external-agent';
+const AMP_URL = 'https://ampcode.com/mcp?profile=puck';
 const CATALOG = [
   { id: 'mock-model', displayName: 'Mock', supportedReasoningEfforts: ['low', 'high'] },
   { id: 'model-b', displayName: 'B' },
@@ -68,7 +68,11 @@ test('surface: exactly eleven strict tools, removed names are not callable, poli
       assert.equal(tools.find((x) => x.name === name).annotations.readOnlyHint, true, name);
     }
     const create = tools.find((x) => x.name === 'droid_create_session');
-    assert.ok(create.inputSchema.required.includes('replyTo') && create.inputSchema.required.includes('model'));
+    for (const name of ['droid_create_session', 'droid_send_message']) {
+      const required = tools.find((x) => x.name === name).inputSchema.required;
+      assert.ok(required.includes('requestKey') && !required.includes('model'), `${name}: requestKey required, model optional`);
+    }
+    assert.ok(create.inputSchema.required.includes('replyTo'), 'replyTo stays required on create');
     assert.match(tools.find((x) => x.name === 'droid_send_message').description, /interrupt:\s*true/);
     assert.match(tools.find((x) => x.name === 'droid_send_message').description, /not Amp's|does not interrupt by default|default.*interrupt:\s*false/i);
   });
@@ -198,8 +202,7 @@ test('session lifecycle: create, status, read, send, steer, cancel, update, find
     assert.equal((await h.status(a)).preview.text, 'answer:second');
     const droidId = readState(h).sessions[a].droidSessionId;
     assert.equal(audit(h).filter((x) => x.method === 'droid.load_session').at(-1).params.sessionId, droidId);
-    // model is required for every new turn.
-    await assert.rejects(call(h, 'droid_send_message', { session: a, requestKey: 'no-model', message: 'x' }), /model/);
+    // An omitted model inherits the session's model (see settings-defaults.test.mjs); unknown ids still reject.
     await rejectsWith(h.send(a, 'bad-model', 'x', { model: 'nope' }), 'model_unavailable');
   });
 

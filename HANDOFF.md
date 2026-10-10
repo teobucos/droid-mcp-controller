@@ -1,7 +1,10 @@
-# Install and connect securely
+# Install and connect Droid MCP securely
 
 Install on the machine with the authenticated Droid CLI, not in a temporary
-cloud coding environment. The controller was exercised with Droid **0.233.0**.
+cloud coding environment. Droid MCP is verified with Droid CLI **0.236.0** and the
+pinned `@factory/droid-sdk` **0.9.1** on Node.js 22 (Linux or macOS). Docker is not
+required, and a container alone is not enough: it still needs the CLI, its login,
+the approved workspaces and private state. See README.md "Requirements".
 It uses that CLI's login; it does not need a separate SDK API key. For an existing
 installation, preserve its URL, bearer, user/HOME, state store, and approvals.
 
@@ -32,7 +35,7 @@ From each approved repository, run `git var GIT_AUTHOR_IDENT` and
 existing configured identity, not an email inferred from commit history or a
 GitHub login. Factory's [0.213.0 release notes](https://docs.factory.com/docs/changelog/releases/0.213.0.json)
 state that Droid uses the configured Git identity; this installation targets
-0.233.0. The [settings](https://docs.factory.com/cli/configuration/settings)
+0.236.0. The [settings](https://docs.factory.com/cli/configuration/settings)
 option `includeCoAuthoredByDroid` controls a co-author trailer, not the primary
 author. It does not fix a missing Git identity.
 
@@ -80,8 +83,8 @@ need no service restart. None of this expands controller workspace approval.
 Create a private state directory **outside** the repositories Droid may edit:
 
 ```sh
-mkdir -p "$HOME/.local/state/droid-controller"
-chmod 700 "$HOME/.local/state/droid-controller"
+mkdir -p "$HOME/.local/state/droid-mcp"
+chmod 700 "$HOME/.local/state/droid-mcp"
 cp config.example.json config.json
 ```
 
@@ -91,14 +94,21 @@ Edit `config.json` locally. Use actual absolute paths, e.g. `/home/alice/...` or
 ```json
 {
   "approvedDirectories": ["/home/alice/projects/approved-repo"],
-  "stateDirectory": "/home/alice/.local/state/droid-controller",
+  "stateDirectory": "/home/alice/.local/state/droid-mcp",
   "droidPath": "/home/alice/.local/bin/droid",
   "transport": "stdio",
   "maxAutonomy": "high",
   "defaultAutonomy": "high",
+  "defaultModel": "claude-opus-5-5",
+  "reasoningEffort": "high",
   "modelCacheTtlMs": 60000
 }
 ```
+
+An existing installation keeps its current `stateDirectory`; the path is an example,
+and moving live state is never part of an upgrade. Set `defaultModel` to a standard
+id from your live `droid_models` catalog (never a Fast variant; startup refuses an
+id that looks like one). Without it, every create must pass `model`.
 
 The owner's execution policy is High/full supported service-user access for
 Droid agents. Source fallbacks and example config both use `defaultAutonomy` and
@@ -110,9 +120,11 @@ config with only `maxAutonomy:"off"` now needs an explicit off default.
 Inspect project hooks and existing Factory MCP configuration first. Approved cwd is not an OS sandbox;
 use a restricted user/container if hard directory containment is required.
 
-If an explicit reasoning level is required, add `reasoningEffort` supported by
-the chosen Factory model. It is independent of autonomy and applies on start
-and resume; the optional per-turn field overrides it. High autonomy approves
+`reasoningEffort` is the host's preferred level. It is independent of autonomy and
+is used when the selected model supports it; otherwise the model's live default
+applies. An explicit per-turn value overrides it and must be supported. Follow-ups
+keep the session's model, autonomy (capped at the ceiling) and, for the same model,
+its reasoning; see README.md "Launch defaults and follow-up inheritance". High autonomy approves
 offered single-use permissions, not persistent rules; questions are recorded
 and declined instead of guessing answers. Inspect unanswered questions even
 when the SDK reports success. Tool discovery shows approvals, default, ceiling,
@@ -133,7 +145,7 @@ With no other controller owning this state directory:
 ```sh
 npm run smoke -- --config "$PWD/config.json" \
   --model YOUR_ENABLED_MODEL_ID \
-  --out "$HOME/.local/state/droid-controller/acceptance.json"
+  --out "$HOME/.local/state/droid-mcp/acceptance.json"
 ```
 
 Replace `YOUR_ENABLED_MODEL_ID` with the selected `droid_models` ID. The smoke
@@ -175,7 +187,7 @@ For remote Puck, generate a token locally without printing it:
 
 ```sh
 (umask 077; node -e 'require("node:fs").writeFileSync(process.argv[1], require("node:crypto").randomBytes(32).toString("base64url")+"\n", {flag:"wx",mode:0o600})' \
-  "$HOME/.local/state/droid-controller/mcp-token")
+  "$HOME/.local/state/droid-mcp/mcp-token")
 ```
 
 Change config to `"transport":"http"`, add `"port":8787`, and set
@@ -204,11 +216,11 @@ locally and through that TLS route:
 ```sh
 npm run smoke -- --config "$PWD/config.json" \
   --model YOUR_ENABLED_MODEL_ID \
-  --out "$HOME/.local/state/droid-controller/http-acceptance.json"
+  --out "$HOME/.local/state/droid-mcp/http-acceptance.json"
 npm run smoke -- --config "$PWD/config.json" \
   --model YOUR_ENABLED_MODEL_ID \
   --url 'https://YOUR-APPROVED-HOST/mcp' \
-  --out "$HOME/.local/state/droid-controller/remote-acceptance.json"
+  --out "$HOME/.local/state/droid-mcp/remote-acceptance.json"
 ```
 
 These read the token file locally; do not put token values on command lines.
@@ -231,9 +243,12 @@ credentials just to upgrade controller source.
 
 Check-server and tool discovery must reveal exactly the 11 session tools
 (`droid_create_session` ... `droid_models`). Removed names must fail at dispatch;
-refresh cached catalogs and update callers before reuse. For a connection named **Droid Grokbot**, Puck
-imports from `droid-grokbot` through `code_exec`, as in README.md and
-[docs/TOOLS.md](docs/TOOLS.md). Run an actual read-only create/wait/read/send and a
+refresh cached catalogs and update callers before reuse. Name the connection
+**Droid MCP** with server ID `droid-mcp`; Puck then imports the tools from `droid-mcp`
+through `code_exec` (see [docs/TOOLS.md](docs/TOOLS.md)). In Amp, renaming a remote
+server's display name does not change its ID; editing the ID in MCP settings keeps its
+sign-ins and cached tools but changes the import name for every caller, so coordinate
+an ID change with Puck instead of recreating the connection. Run an actual read-only create/wait/read/send and a
 separate cancel through that remote connection: local smoke is not cloud/Puck
 acceptance proof. Keep session handles; use `droid_wait_for_sessions` (bounded
 joins) rather than polling. There is no completion push.
@@ -248,7 +263,8 @@ paths. Capacity defaults to 4 (`maxConcurrentRuns`, 1 to 16) and is reported by
 
 This is separate from Puck's Bearer connection to the controller. Add private
 `"ampMcp": {}` host configuration (README.md). The endpoint is the generic
-`https://ampcode.com/mcp?profile=external-agent`: it must not carry a `threadID`, and the
+`https://ampcode.com/mcp?profile=puck` (the only profile Amp currently accepts; any other
+`ampMcp.url` is refused at startup): it must not carry a `threadID`, and the
 old `puck: {conversationId, url?}` key is rejected at startup. Recipients are chosen per
 session with `replyTo`; no host default exists. Never place personal thread IDs, tokens
 or private MCP headers in the public repository.

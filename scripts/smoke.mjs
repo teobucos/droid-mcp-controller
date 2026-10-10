@@ -12,7 +12,7 @@ const { values } = parseArgs({ options: { config: { type: 'string' }, out: { typ
 if (!values.config || !values.out) throw new Error('Usage: npm run smoke -- --config /absolute/config.json --out /absolute/evidence.json --model model-id [--url https://host/mcp] [--expect-auth-failure]');
 if (!values.model) throw new Error('--model is required: pick an id from droid_models');
 const config = JSON.parse(readFileSync(values.config, 'utf8'));
-const client = new Client({ name: 'droid-controller-smoke', version: '0.2.0' });
+const client = new Client({ name: 'droid-mcp-smoke', version: JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')).version });
 const report = { at: new Date().toISOString(), node: process.version, model: values.model, passed: false, runs: [] };
 let session;
 async function call(name, args) {

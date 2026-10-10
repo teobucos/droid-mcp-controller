@@ -1,10 +1,12 @@
 {
   "approvedDirectories": ["/absolute/path/to/approved/project"],
-  "stateDirectory": "/absolute/path/to/private/droid-controller-state",
+  "stateDirectory": "/absolute/path/to/private/droid-mcp-state",
   "droidPath": "/absolute/path/to/home/.local/bin/droid",
   "transport": "stdio",
   "maxAutonomy": "high",
   "defaultAutonomy": "high",
+  "defaultModel": "claude-opus-5-5",
+  "reasoningEffort": "high",
   "maxConcurrentRuns": 4,
   "modelCacheTtlMs": 60000,
   "ampMcp": {}

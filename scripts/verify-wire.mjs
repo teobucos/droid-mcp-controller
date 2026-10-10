@@ -1,4 +1,4 @@
-// Test-only SDK transport observation, enabled solely by verify-live.mjs.
+// Test-only SDK transport observation, enabled solely by the verify-* scripts.
 // No prompt, result content, headers, credentials, or session UUIDs are logged.
 import { appendFileSync } from 'node:fs';
 import { ProcessTransport } from '@factory/droid-sdk/node';
@@ -12,7 +12,7 @@ if (process.env.DROID_VERIFY_WIRE) {
     if (!pending.has(this)) pending.set(this, new Map());
     if (request.type === 'request') pending.get(this).set(request.id, request.method);
     await send.call(this, line);
-    record({ kind: 'sent', method: request.method, cliPid: this.getManagedProcess().childProcess.pid });
+    record({ kind: 'sent', method: request.method, cliPid: this.getManagedProcess().childProcess.pid, attachesMcp: Boolean(request.params?.mcpServers?.length) });
   };
   const onMessage = ProcessTransport.prototype.onMessage;
   ProcessTransport.prototype.onMessage = function (handler) {

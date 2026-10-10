@@ -1,16 +1,27 @@
-# Droid MCP controller
+# Droid MCP
 
-A small, same-host MCP server that lets Puck manage Factory Droid sessions the
+Droid MCP (`droid-mcp`) is a small, same-host MCP server that lets Puck manage Factory Droid sessions the
 way it manages Amp threads: create, message and steer, status, read, wait, find,
 update, cancel, usage, workspaces and models, with agent reply-back through the
 Amp MCP. No UI, database service, Factory daemon or account API. Installation and
 secure connection steps are in [HANDOFF.md](HANDOFF.md); the full, generated tool
 schemas are in [docs/TOOLS.md](docs/TOOLS.md).
 
-Requires Node.js 22+, Linux or macOS, and an authenticated Droid CLI (verified with
-**0.236.0**, normally `~/.local/bin/droid`). The controller inherits the service
-user's login environment and never collects credentials. Dependencies are locked;
-`uuid` is overridden to 11.1.1 to fix GHSA-w5hq-g745-h8pq.
+### Requirements
+
+- Linux or macOS (process-group cleanup; enforced at startup) and Node.js 22 or newer.
+- An installed Factory Droid CLI (verified with **0.236.0**, normally `~/.local/bin/droid`)
+  and the pinned `@factory/droid-sdk` **0.9.1** from `package-lock.json`.
+- Factory authentication for the service user: an existing CLI login, or Factory's
+  supported API-key setup for `droid` itself. The controller inherits that environment
+  and never collects credentials.
+- Absolute, existing approved workspace roots and a private (700) state directory.
+- Optional: an authenticated HTTPS route for remote Puck access (`transport:"http"` with a
+  bearer token file), and Amp MCP OAuth on the host for agent reply-back (`ampMcp`).
+
+Docker is neither required by the source nor sufficient on its own: a container still
+needs the CLI, its Factory login, the workspaces and private state. Dependencies are
+locked; `uuid` is overridden to 11.1.1 to fix GHSA-w5hq-g745-h8pq.
 
 ```sh
 npm ci --ignore-scripts
@@ -42,10 +53,11 @@ Factory session UUIDs never leave the controller.
 Typical flow (tool arguments, not shell commands):
 
 ```json
-{"requestKey":"review-42","workspace":"/approved/repo","prompt":"Review the diff and report findings.","model":"MODEL_ID","autonomy":"off","replyTo":"T-...","title":"Diff review"}
+{"requestKey":"review-42","workspace":"/approved/repo","prompt":"Review the diff and report findings.","autonomy":"off","replyTo":null,"title":"Diff review"}
 ```
 
-1. `droid_list_workspaces` (roots, capacity, policy) and `droid_models` (pick an id).
+1. `droid_list_workspaces` (roots, capacity, policy including `defaultModel`); `droid_models`
+   only when you want a model other than the host default.
 2. `droid_create_session` with a stable `requestKey`; keep `metadata.session`.
 3. `droid_wait_for_sessions({sessions:[...]})` in a loop; a timeout is not failure.
 4. Inspect `latestRun.state`, `needsAttention`, `notification`; `droid_read_session` for detail.
@@ -117,7 +129,7 @@ notification never turns a finished run into a failed run.
 `droid_cancel` are removed, not hidden. The catalog contains exactly 11 tools.
 Old names fail at dispatch; there are no aliases or compatibility flags.
 Callers must use session handles with create/send/status/read/find/cancel session
-tools, explicitly select a current model, and supply `replyTo` on creation.
+tools and supply `replyTo` on creation. `model` is optional (see Launch defaults).
 Refresh cached MCP catalogs. `droid_models` is unchanged. Internal run IDs remain
 turn identifiers, not a second API. The repository's smoke/acceptance drivers use
 the session API; external clients that imported the removed names must change.
@@ -127,8 +139,8 @@ the session API; external clients that imported the removed names must change.
 `droid_models` initializes a short-lived Droid connection with the same CLI, service
 user, HOME and `FACTORY_HOME_OVERRIDE` as normal runs, captures the live
 `availableModels`, closes the session, and never submits a prompt
-or approves a tool. Create and send validate `model` and `reasoningEffort` against
-that catalog and reject with `model_unavailable` / `reasoning_unsupported`. Entries
+or approves a tool. Create and send validate the effective `model` and `reasoningEffort`
+against that catalog and reject with `model_unavailable` / `reasoning_unsupported`. Entries
 with `disabled:true` or `deprecated:true` are omitted; optional metadata is returned
 only when Factory supplies it. CLI 0.236.0 supplies `deprecated` in initialization;
 the pinned SDK strips it, so raw capture is correlated to that initialization's request
@@ -138,10 +150,83 @@ and the installed `droid exec --help` deprecation labels when metadata is absent
 `modelCacheTtlMs` defaults to 60000 (5000 to 600000); concurrent callers share one
 refresh; a failed refresh returns `model_discovery_failed`, never an expired catalog.
 
+## Launch defaults and follow-up inheritance
+
+Every new turn records its **effective** `model`, `autonomy` and `reasoningEffort`
+(shown in `latestRun`). They are resolved once, at acceptance, against the live catalog:
+
+| Setting | Explicit | Omitted on `droid_create_session` | Omitted on `droid_send_message` |
+| --- | --- | --- | --- |
+| `model` | Must be in the live catalog | Host `defaultModel`, live-validated; `model_required` if unset | The session's last accepted model (not the host default) |
+| `autonomy` | Above `maxAutonomy` is rejected, never silently downgraded | Host `defaultAutonomy` | The session's last accepted autonomy, capped at the current `maxAutonomy` |
+| `reasoningEffort` | Must be supported by the selected model | Host `reasoningEffort` if supported, otherwise the model's live default | Same model: the session's last effort if still supported; then host effort if supported; then the model's live default |
+
+"Last accepted" includes queued work, so FIFO follow-ups see the settings of the turn
+queued before them. A follow-up therefore never promotes a read-only session to the
+host's high default, and a model change never carries the old model's effort (the same
+rule Factory documents for subagents switching models). When nothing supported is known
+for a changed model, the send is rejected and asks for an explicit `reasoningEffort`.
+
+`defaultModel` must be a standard model. A Fast variant is refused automatically: at
+startup when the id looks like Fast, and at launch when the live display name does.
+This is a name-based heuristic (`-fast`, `Fast Mode`), not catalog metadata. A caller
+can still choose a Fast model explicitly. The recommended host values are
+`"defaultModel": "claude-opus-5-5"` (standard Opus 5.5, if present in your live
+catalog) with `"reasoningEffort": "high"`.
+
+Accepted request keys replay their **original** effective settings, without consulting
+the catalog, even after defaults, the catalog or the ceiling change. Omitted fields in a
+replay compare against those recorded values; a different explicit value is
+`request_key_conflict`. Existing records need no migration.
+
+## Direct launch from Puck
+
+Routine work needs no Amp preparation thread, runner, worktree or controller restart:
+Puck calls the connected Droid MCP and the controller starts a Factory Droid session.
+
+One-time host setup (operator, per host or project):
+
+1. Install, authenticate the service user's Droid CLI, configure state and transport
+   (HANDOFF.md).
+2. Approve each project root in `approvedDirectories`; restart the controller when idle.
+3. Set `defaultModel` (and optionally `reasoningEffort`, autonomy policy).
+4. Only for reply-back: `ampMcp` plus the one-time Amp OAuth sign-in for its exact URL.
+
+Per task, Puck only calls `droid_create_session` with `requestKey`, an approved
+`workspace`, `prompt` and `replyTo` (`null` for detached work), then
+`droid_wait_for_sessions`, `droid_read_session` and `droid_send_message`. Detached
+sessions never contact Amp, so they need no Amp authorization. An unapproved project
+fails with `workspace_not_approved`, whose action names the one-time setup.
+
+Isolation: writer turns hold a lock on their whole canonical workspace tree, so two
+sessions writing the same tree run one after the other. For parallel writers, the
+operator provisions separate directories or Git worktrees **inside** an approved root
+once, and Puck targets them directly. The controller does not create worktrees.
+Droid's native `--worktree` places checkouts under `worktreeDirectory`
+(default `~/.factory/worktrees`), outside the approved roots, and changes the session
+cwd, which the controller's resume check rejects; enabling it would widen the approved
+filesystem scope and is left as an explicit operator decision.
+
+### Factory web visibility
+
+The controller runs Droid through SDK `ProcessTransport` (`droid exec
+--input-format stream-jsonrpc`) as the service user. Factory documents
+`cloudSessionSync` (default `true`, org settings can override it) as mirroring CLI
+sessions to Factory web, so such sessions are **expected** at
+`https://app.factory.ai/sessions/<Factory session UUID>`. Whether a given session is
+actually visible has to be checked in an authenticated browser; local history alone is
+not proof of upload. Factory session UUIDs stay out of the tool surface; the operator
+can map controller sessions to them from `sessions[*].droidSessionId` in the private
+`state.json`. Registered-computer Remote Control (`droid computer register`,
+`droid daemon --remote-access`) is a different feature. It is not used or enabled here,
+and enabling it would let external clients bypass the controller's root locks.
+
 ## Droid reports and questions use the actual Amp MCP
 
 Reply-back is opt-in per host: `"ampMcp": {}` in the private config. The endpoint is
-**generic**: `https://ampcode.com/mcp?profile=external-agent`. It names no thread and
+**generic**: `https://ampcode.com/mcp?profile=puck`, the only profile Amp currently
+accepts (others return HTTP 400 `Unknown MCP profile; expected one of: puck`). Any
+other `ampMcp.url` is refused at startup; there are no aliases. It names no thread and
 no recipient; a `threadID` in the URL, or the old `puck.conversationId`, is rejected
 at startup, because a thread-bound endpoint broke every launch when its thread was
 archived and a host default recipient silently misrouted omitted `replyTo`.
@@ -150,7 +235,7 @@ Recipients are per session (`replyTo`) and are never defaulted.
 The controller attaches `amp-puck` through SDK `mcpServers` on create **and** resume,
 **only for routed sessions** (`replyTo` non-null); detached sessions never touch the
 endpoint. Tool exposure is **default deny**: only `amp-puck___puck` (send, read_reply) is meant to be
-usable. The thread-free endpoint was observed live to offer `manage_amp` (admin) and
+usable. The earlier thread-free profile was observed live to offer `manage_amp` (admin) and
 `find_thread` / `read_thread` (read other Amp threads) too, so those start in
 `disabledToolIds`; the preflight then lists what the server actually exposes, denies every
 other `amp-puck___*` tool it finds (a new Amp tool is blocked automatically), and verifies
@@ -291,12 +376,13 @@ Optional settings:
 | `transport` | `stdio` (no network listener) |
 | `maxAutonomy` | `high` (owner-authorized service-user access) |
 | `defaultAutonomy` | Inherits `maxAutonomy` (`high` when both omitted); an explicit default cannot exceed the ceiling |
-| `reasoningEffort` | Unset; otherwise `off`, `none`, `dynamic`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`, supported by the selected Factory model |
+| `defaultModel` | Unset (create then needs `model`). A standard live-catalog id used when create omits `model`; Fast variants are refused |
+| `reasoningEffort` | Unset; otherwise `off`, `none`, `dynamic`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Used when supported by the selected model, otherwise the model's live default applies |
 | `maxConcurrentRuns` | 4 (1 to 16); queued turns wait FIFO |
 | `runTimeoutMs` | 3600000 (one hour wall clock, including setup) |
 | `cancelGraceMs` | 5000, also bounds terminal cleanup |
 | `modelCacheTtlMs` | 60000, bounded to 5000–600000 |
-| `ampMcp` | Unset; `{}` enables reply-back with the generic Amp endpoint. `url` is optional and must be thread-free. The old `puck` key is rejected |
+| `ampMcp` | Unset; `{}` enables reply-back with the generic Amp endpoint. `url` is optional and must equal `https://ampcode.com/mcp?profile=puck`. The old `puck` key is rejected |
 | `port` | 8787, HTTP only; binds **127.0.0.1 only** |
 | `tokenFile` | Required for HTTP; private file, ≥32 URL-safe random characters |
 | `publicUrl` | Optional approved HTTPS proxy URL, ending in `/mcp` |
@@ -374,6 +460,7 @@ schemas and errors, idempotency, steering and queueing, N parallel sessions,
 capacity queueing, overlapping-workspace serialization (both lock directions,
 symlinks, FIFO fairness), mixed autonomy, concurrent reply-back with per-session
 recipients, misroute detection, cancel/steer isolation, Amp MCP preflight failures,
+launch defaults and follow-up inheritance (`test/settings-defaults.test.mjs`),
 removed-tool rejection, unsupported-state refusal, crash fail-closed and queue loss. See `test/README.md`.
 `test/review-regressions.test.mjs` and `test/worker-ack.test.mjs` additionally test
 durable queue supersession, persistence ACK fault boundaries, per-run reply handles,

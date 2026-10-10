@@ -11,7 +11,7 @@ import { randomUUID, createHash } from 'node:crypto';
 import { fork } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { EventEmitter } from 'node:events';
-import { approvedWorkspace, pathsOverlap, contains } from './config.mjs';
+import { approvedWorkspace, pathsOverlap, contains, looksFast } from './config.mjs';
 import { ToolError } from './errors.mjs';
 import { openStore, atomicJson, defaultTitle, resultState, LIVE, WORKING } from './store.mjs';
 import { sessionStatus, isWorking, resultMessages, noticeMessage, turnNotices } from './views.mjs';
@@ -88,43 +88,78 @@ export class Controller {
     return sessionStatus(session, this.runsOf(sessionId));
   }
 
+  // Accepted keys replay without the catalog, so later catalog changes cannot break them.
   async create(args) {
-    if (!this.keys.has(args.requestKey)) await this.checkSettings(args);
-    return this.status(this.accept({ kind: 'create', ...args }).sessionId);
+    const catalog = this.keys.has(args.requestKey) ? null : await this.models.get();
+    return this.status(this.accept({ kind: 'create', ...args }, catalog).sessionId);
   }
 
   async send(args) {
-    if (!this.keys.has(args.requestKey)) await this.checkSettings(args);
-    const run = this.accept({ kind: 'send', ...args });
+    const catalog = this.keys.has(args.requestKey) ? null : await this.models.get();
+    const run = this.accept({ kind: 'send', ...args }, catalog);
     return { runId: run.runId, disposition: run.disposition, status: this.status(run.sessionId) };
   }
 
-  // Model and reasoning are validated against the live catalog, never a list we keep.
-  async checkSettings({ model, reasoningEffort }) {
-    const catalog = await this.models.get();
+  // Effective settings for a NEW turn, validated against the live catalog (never a
+  // list we keep). Explicit values win and are strict. A follow-up inherits the last
+  // accepted turn of its session (including queued work), so host defaults never
+  // silently change a session; a create falls back to the host defaults.
+  resolveSettings(intent, head, catalog) {
+    const { config } = this;
+    const model = intent.model ?? head?.model ?? config.defaultModel;
+    const source = intent.model ? 'requested' : head?.model ? 'session' : 'host';
+    if (!model) throw new ToolError('model_required', 'No model was given and the controller host has no defaultModel');
     const entry = catalog.models.find((item) => item.id === model);
-    if (!entry) throw new ToolError('model_unavailable', `Model "${model}" is not in the current Factory catalog`);
-    const effort = reasoningEffort ?? this.config.reasoningEffort;
-    if (effort && entry.supportedReasoningEfforts && !entry.supportedReasoningEfforts.includes(effort)) {
-      throw new ToolError('reasoning_unsupported', `Model "${model}" supports reasoningEffort ${entry.supportedReasoningEfforts.join(', ')}; ${reasoningEffort ? 'requested' : 'the host default is'} "${effort}"${reasoningEffort ? '' : ' (pass reasoningEffort explicitly)'}`);
+    if (!entry) {
+      const which = { requested: `Model "${model}"`, session: `The session's model "${model}"`, host: `The host defaultModel "${model}"` }[source];
+      throw new ToolError('model_unavailable', `${which} is not in the current Factory catalog${source === 'requested' ? '' : '; pass model explicitly'}`);
     }
+    if (source === 'host' && (looksFast(entry.id) || looksFast(entry.displayName))) {
+      throw new ToolError('default_model_refused', `The host defaultModel "${model}" (${entry.displayName}) appears to be a Fast variant by name; Fast is never chosen automatically`);
+    }
+
+    let autonomy;
+    if (intent.autonomy) {
+      if (levels.indexOf(intent.autonomy) > levels.indexOf(config.maxAutonomy)) throw new ToolError('autonomy_exceeds_ceiling', `Requested autonomy exceeds configured maxAutonomy (${config.maxAutonomy})`);
+      autonomy = intent.autonomy;
+    } else if (head) autonomy = levels[Math.min(levels.indexOf(head.autonomy), levels.indexOf(config.maxAutonomy))];
+    else autonomy = config.defaultAutonomy;
+
+    const supported = entry.supportedReasoningEfforts;
+    const fits = (effort) => Boolean(effort) && (!supported || supported.includes(effort));
+    let reasoningEffort;
+    if (intent.reasoningEffort) {
+      if (!fits(intent.reasoningEffort)) throw new ToolError('reasoning_unsupported', `Model "${model}" supports reasoningEffort ${supported.join(', ')}; requested "${intent.reasoningEffort}"`);
+      reasoningEffort = intent.reasoningEffort;
+    } else if (head && head.model === model && fits(head.reasoningEffort)) reasoningEffort = head.reasoningEffort;
+    else if (fits(config.reasoningEffort)) reasoningEffort = config.reasoningEffort;
+    else if (fits(entry.defaultReasoningEffort)) reasoningEffort = entry.defaultReasoningEffort;
+    else if (head && supported?.length) {
+      // A resumed Droid session keeps its previous effort unless one is sent.
+      throw new ToolError('reasoning_unsupported', `Model "${model}" supports reasoningEffort ${supported.join(', ')} and no supported default is known; pass reasoningEffort explicitly`);
+    }
+    return { model, autonomy, reasoningEffort };
   }
 
   // Synchronous and atomic: nothing awaits between the checks and the durable write.
-  accept(intent) {
+  accept(intent, catalog) {
     const { kind, requestKey } = intent;
     const target = kind === 'send' ? this.session(intent.session) : null;
     // Resume re-authorizes the recorded workspace: roots can be revoked and symlinks can move.
     const workspace = approvedWorkspace(this.config, target ? target.workspace : intent.workspace);
     if (target && workspace !== target.workspace) throw new ToolError('workspace_not_approved', 'The session workspace no longer resolves to the directory it was created in');
     const dup = this.keys.has(requestKey) ? this.state.runs[this.keys.get(requestKey)] : null;
-    // Replays retain their accepted defaults even if host policy changed.
-    const autonomy = intent.autonomy ?? dup?.autonomy ?? this.config.defaultAutonomy;
-    const reasoningEffort = intent.reasoningEffort ?? (dup ? dup.reasoningEffort : this.config.reasoningEffort);
+    // Replays compare against their ORIGINAL effective settings, never re-resolved
+    // ones, so changed defaults, catalog or policy cannot alter an accepted key.
+    let settings;
+    if (dup) settings = { model: intent.model ?? dup.model, autonomy: intent.autonomy ?? dup.autonomy, reasoningEffort: intent.reasoningEffort ?? dup.reasoningEffort };
+    else if (!catalog) throw new ToolError('internal_error', 'Request key state changed during validation; retry with the same arguments');
+    else settings = this.resolveSettings(intent, target ? this.state.runs[target.headRunId] : null, catalog);
+    const { autonomy, reasoningEffort } = settings;
     const replyTo = intent.replyTo !== undefined ? intent.replyTo : dup ? dup.replyTo : target.replyTo;
     const labels = intent.labels ? [...new Set(intent.labels)].sort() : [];
     const fingerprint = sha({
-      kind, target: target?.sessionId ?? workspace, prompt: intent.prompt, autonomy, model: intent.model ?? null, reasoningEffort: reasoningEffort ?? null,
+      kind, target: target?.sessionId ?? workspace, prompt: intent.prompt, autonomy, model: settings.model ?? null, reasoningEffort: reasoningEffort ?? null,
       // This fixed slot is part of the persisted session API hash format. Changing
       // it would invalidate current request keys; original prompts are not retained.
       replyTo, interrupt: Boolean(intent.interrupt), title: intent.title ?? null, labels, continuesRun: null,
@@ -133,7 +168,6 @@ export class Controller {
       if (dup.fingerprint !== fingerprint) throw new ToolError('request_key_conflict', 'requestKey was already used with different arguments');
       return dup;
     }
-    if (levels.indexOf(autonomy) > levels.indexOf(this.config.maxAutonomy)) throw new ToolError('autonomy_exceeds_ceiling', `Requested autonomy exceeds configured maxAutonomy (${this.config.maxAutonomy})`);
     if (this.stopping) throw new ToolError('shutting_down', 'Controller is shutting down');
     if (replyTo && !this.config.ampMcp) throw new ToolError('reply_back_unavailable', 'Amp MCP is not configured on this host; use replyTo:null or configure ampMcp');
     let runs = [];
@@ -155,7 +189,7 @@ export class Controller {
     const disposition = intent.interrupt && runs.some((run) => LIVE.has(run.state)) ? 'interrupting' : runs.some((run) => WORKING.has(run.state)) ? 'queued' : 'started';
     const runId = randomUUID();
     const run = {
-      runId, sessionId: session.sessionId, requestKey, fingerprint, workspace, autonomy, model: intent.model ?? null,
+      runId, sessionId: session.sessionId, requestKey, fingerprint, workspace, autonomy, model: settings.model,
       replyRouteId: target && target.replyTo === replyTo ? this.state.runs[target.headRunId].replyRouteId : runId,
       ...(reasoningEffort ? { reasoningEffort } : {}), replyTo, disposition, state: 'queued', createdAt: stamp, updatedAt: stamp,
       droidSessionId: null, replyHandles: [], events: [], textTail: '', stderrTail: '', preview: '', cancelRequested: false,
@@ -471,7 +505,7 @@ export class Controller {
     return {
       workspaces: this.config.approvedDirectories,
       capacity: { maximum, active: this.workers.size, queued: this.queue.length, available: Math.max(0, maximum - this.workers.size) },
-      policy: { defaultAutonomy: this.config.defaultAutonomy, maxAutonomy: this.config.maxAutonomy, reasoningEffort: this.config.reasoningEffort ?? null, replyBack: Boolean(this.config.ampMcp) },
+      policy: { defaultModel: this.config.defaultModel ?? null, defaultAutonomy: this.config.defaultAutonomy, maxAutonomy: this.config.maxAutonomy, reasoningEffort: this.config.reasoningEffort ?? null, replyBack: Boolean(this.config.ampMcp) },
     };
   }
 

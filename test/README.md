@@ -71,6 +71,21 @@ The mock artifacts prove configuration/protocol wiring only. Live acceptance als
 requires an actual agent-origin message and correlated Puck reply; discovery alone
 cannot prove delivery.
 
+## Launch defaults and inheritance failure cases
+
+`test/settings-defaults.test.mjs` was written before the implementation and run to
+fail first. It distinguishes: a create with no model and no host default that is
+accepted or leaves a session; a host default used without live-catalog validation;
+an automatic Fast default (by id at startup, by live display name at launch) or a
+refused explicit Fast choice; a follow-up taking the host model, autonomy or
+reasoning instead of the session's; an old model's effort carried to a new model;
+same-model effort not reused; queued settings ignored by later queued follow-ups;
+inherited autonomy above a lowered ceiling not capped, or an explicit over-ceiling
+request silently downgraded; and replays re-resolved against changed defaults,
+catalog or ceiling. It also pins the current Amp contract (`profile=puck` only) and
+that detached sessions never touch Amp. Mutating the controller to each of these
+wrong behaviors makes the suite fail.
+
 ## Session surface failure cases
 
 `test/session-surface.test.mjs` was written before the implementation. Each case names a
