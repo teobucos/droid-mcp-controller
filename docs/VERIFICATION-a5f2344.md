@@ -44,11 +44,38 @@ previous path. No state fields, schemas, fingerprints or tool contracts changed.
 | `npm run check` | Passed. |
 | Full `npm test` on `a5f2344` source | 117/117 in the final two consecutive runs. |
 
-Earlier runs of the same source showed intermittent `timed_out` results in other,
-deadline-sensitive tests (several in `test/e2e.test.mjs`, which runs first, and one
-run of the new lock case before its timings were relaxed). Each passed when rerun on
-its own. Two full runs of `bafe209` passed 110/110. The untitled code path is
-unchanged, but the intermittent failures were not proven to be unrelated.
+### Every full-suite run
+
+| Run | Source | Result | Failing test (duration vs. its passing runs) |
+| --- | --- | --- | --- |
+| 1 | fix, pre-commit | 116/117 | e2e "SDK tool-only…": `timed_out`, 13.7 s vs ~5.0 s |
+| 2 | fix, pre-commit | 117/117 | none |
+| 3 | fix, pre-commit | 116/117 | e2e "terminal result survives crash…": `timed_out`, 13.4 s vs ~1.1 s |
+| 4 | fix, pre-commit | 116/117 | e2e "MCP discovery/settings failures…": `timed_out`, 10.8 s vs ~3.6 s |
+| 5 | `bafe209` | 110/110 | none |
+| 6 | fix, 4000 ms timings | 115/117 | new lock case: `timed_out`, 13.5 s vs ~4.2 s (and its parent group) |
+| 7 | `bafe209` | 110/110 | none |
+| 8 | fix, 4000 ms timings | 117/117 | none |
+| 9 | `a5f2344` | 117/117 | none |
+| 10 | `a5f2344` | 117/117 | none |
+| 11 | `a5f2344` + stall probe | 116/117 | review-regressions "delayed reply: ownership…": 13.5 s vs ~5.0 s |
+
+Every failure is a deadline or timing assertion. Each failing test ran 7 to 12 s longer
+than its own passing runs, and every failing test except the lock case runs only
+untitled turns, whose code path this fix does not change.
+
+Hypothesis: the guest VM is paused for several seconds when the sandbox host snapshots
+or forks it, freezing every process, so tests with 1.1 to 8 s deadlines time out.
+Discriminating check (run 11): `scripts/stall-probe.mjs` ran beside the suite and
+recorded one 9209 ms timer stall at 04:38:24Z. Its fsync latency stayed at or below
+287 ms over 962 samples, so the stall was a whole-process pause, not slow storage. The
+kernel logged `random: crng reseeded due to virtual machine fork` at the same second,
+and that run's single failure ran about 8.5 s longer than normal. The kernel logged 44
+such events. `dmesg -T` wall times drift across guest pauses, so earlier runs could not
+be matched to individual events. A pause hits only when it lands inside a deadline
+window: three runs, including one of the `bafe209` runs, passed with a logged fork
+inside their time span. The committed regression uses 8000/6500 ms timings instead of
+4000/3100 ms so that a normal-length turn keeps more margin.
 
 ## Real CLI acceptance (SDK/CLI evidence)
 

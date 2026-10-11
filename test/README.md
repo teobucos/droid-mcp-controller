@@ -108,6 +108,13 @@ overrun that still times out without a rename, and a same-tree writer that must 
 until the renaming worker has closed. Three mutations (rename before the result, no
 title cleanup window, deadline left armed after the result) each fail it.
 
+Many E2E cases assert short real deadlines (1.1 to 8 s). On a guest that the host
+pauses (for example a VM snapshot or fork, logged by the kernel as `crng reseeded due
+to virtual machine fork`), every process freezes and such a case can report
+`timed_out`. Before treating an intermittent timeout as a regression, run
+`node scripts/stall-probe.mjs /abs/probe.jsonl 250 & npm test`. A timer stall without
+an fsync spike at the time of the failure points to the host, not the controller.
+
 ## Session surface failure cases
 
 `test/session-surface.test.mjs` was written before the implementation. Each case names a
