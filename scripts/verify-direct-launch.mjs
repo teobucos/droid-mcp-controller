@@ -8,7 +8,8 @@
 //
 // Requires existing Factory CLI login. Never authenticates, updates the CLI, starts a
 // daemon, registers a computer or changes global config. The private report (mode 600)
-// maps controller sessions to Factory session UUIDs and the documented web route; it
+// maps controller sessions to Factory session UUIDs and the documented web route, and
+// records local CLI/SDK title and tag storage (not Factory web display); it
 // holds no prompts, assistant text beyond the fixed markers, tokens or credentials.
 import assert from 'node:assert/strict';
 import { parseArgs } from 'node:util';
@@ -18,6 +19,7 @@ import { mkdirSync, mkdtempSync, writeFileSync, readFileSync, existsSync } from 
 import { join, resolve } from 'node:path';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import { listSessions } from '@factory/droid-sdk/node';
 
 const { values } = parseArgs({ options: { droid: { type: 'string' }, 'default-model': { type: 'string' }, root: { type: 'string' }, reasoning: { type: 'string', default: 'low' } } });
 if (!values.droid?.startsWith('/') || !values['default-model'] || !values.root?.startsWith('/')) throw new Error('Pass --droid /absolute/droid --default-model CURRENT_ID --root /approved/disposable/dir');
@@ -75,7 +77,7 @@ try {
   check('default_model_current', catalog.models.some((m) => m.id === config.defaultModel && m.deprecated !== true));
 
   // Two fresh sessions, model omitted: exactly what Puck sends after one-time setup.
-  const a = await call('droid_create_session', { requestKey: 'direct-a-1', workspace: join(projects, 'alpha'), prompt: 'Reply exactly DIRECT_A_ONE. Do not use any tools.', replyTo: null, title: 'Direct launch A' });
+  const a = await call('droid_create_session', { requestKey: 'direct-a-1', workspace: join(projects, 'alpha'), prompt: 'Reply exactly DIRECT_A_ONE. Do not use any tools.', replyTo: null, title: 'Direct launch A', labels: ['acceptance'] });
   const b = await call('droid_create_session', { requestKey: 'direct-b-1', workspace: join(projects, 'beta'), prompt: 'Reply exactly DIRECT_B_ONE. Do not use any tools.', autonomy: 'low', replyTo: null, title: 'Direct launch B' });
   const ids = [a.metadata.session, b.metadata.session];
   const [a1, b1] = await settle(ids);
@@ -83,6 +85,8 @@ try {
   check('host_defaults_applied', JSON.stringify(effective(a1)) === JSON.stringify({ model: config.defaultModel, autonomy: 'off', reasoningEffort: config.reasoningEffort }) && effective(b1).autonomy === 'low' && effective(b1).model === config.defaultModel);
   const uuids = ids.map((id) => state().sessions[id].droidSessionId);
   check('isolated_factory_sessions', uuids.every(Boolean) && uuids[0] !== uuids[1]);
+  const runsOf = (id) => Object.values(state().runs).filter((r) => r.sessionId === id).sort((x, y) => Date.parse(x.createdAt) - Date.parse(y.createdAt));
+  check('title_applied_after_first_turn', runsOf(ids[0])[0].titleSync?.state === 'applied' && runsOf(ids[0])[0].titleSync.title === 'Direct launch A' && runsOf(ids[1])[0].titleSync?.state === 'applied');
   const runsA = Object.values(state().runs).filter((r) => r.sessionId === ids[0]);
   const runsB = Object.values(state().runs).filter((r) => r.sessionId === ids[1]);
   check('ran_in_parallel', Date.parse(runsA[0].startedAt) < Date.parse(runsB[0].finishedAt) && Date.parse(runsB[0].startedAt) < Date.parse(runsA[0].finishedAt));
@@ -94,12 +98,37 @@ try {
   check('continuations_succeeded', a2.latestRun.state === 'succeeded' && a2.preview.text.trim() === 'DIRECT_A_TWO' && b2.latestRun.state === 'succeeded' && b2.preview.text.trim() === 'DIRECT_B_TWO');
   check('continuations_inherit_session_settings', JSON.stringify(effective(a2)) === JSON.stringify(effective(a1)) && JSON.stringify(effective(b2)) === JSON.stringify(effective(b1)) && effective(b2).autonomy === 'low');
   check('same_factory_session_on_continue', ids.every((id, i) => state().sessions[id].droidSessionId === uuids[i]));
-  check('replay_is_idempotent', (await call('droid_create_session', { requestKey: 'direct-a-1', workspace: join(projects, 'alpha'), prompt: 'Reply exactly DIRECT_A_ONE. Do not use any tools.', replyTo: null, title: 'Direct launch A' })).metadata.session === ids[0]);
-  check('four_turns_submitted', audit().filter((m) => m.kind === 'response' && m.method === 'droid.add_user_message' && m.success).length === 4);
+  check('no_repeat_rename_on_continue', ids.every((id) => runsOf(id)[1].titleSync === undefined));
+  check('replay_is_idempotent', (await call('droid_create_session', { requestKey: 'direct-a-1', workspace: join(projects, 'alpha'), prompt: 'Reply exactly DIRECT_A_ONE. Do not use any tools.', replyTo: null, title: 'Direct launch A', labels: ['acceptance'] })).metadata.session === ids[0]);
+
+  // A metadata title change reaches Factory on the next admitted turn, never by itself.
+  const turnsBefore = audit().filter((m) => m.kind === 'sent' && m.method === 'droid.add_user_message').length;
+  await call('droid_update_session', { session: ids[0], title: 'Direct launch A renamed' });
+  check('update_starts_no_turn', audit().filter((m) => m.kind === 'sent' && m.method === 'droid.add_user_message').length === turnsBefore);
+  await call('droid_send_message', { session: ids[0], requestKey: 'direct-a-3', message: 'Reply exactly DIRECT_A_THREE. Do not use any tools.' });
+  const [a3] = await settle([ids[0]]);
+  check('renamed_turn_succeeded', a3.latestRun.state === 'succeeded' && a3.preview.text.trim() === 'DIRECT_A_THREE' && a3.latestRun.needsAttention === false);
+  check('update_title_applied_next_turn', runsOf(ids[0])[2].titleSync?.state === 'applied' && runsOf(ids[0])[2].titleSync.title === 'Direct launch A renamed');
+  check('three_successful_rename_rpcs', audit().filter((m) => m.kind === 'response' && m.method === 'droid.rename_session' && m.success).length === 3);
+  check('five_turns_submitted', audit().filter((m) => m.kind === 'response' && m.method === 'droid.add_user_message' && m.success).length === 5);
+
+  // Local CLI/SDK storage evidence only; Factory web display needs an authenticated browser.
+  const expected = ['Direct launch A renamed', 'Direct launch B'];
+  const local = [];
+  for (const [i, name] of ['alpha', 'beta'].entries()) {
+    const listed = (await listSessions({ cwd: join(projects, name) })).find((item) => item.id === uuids[i]);
+    const folder = join(process.env.HOME, '.factory/sessions', join(projects, name).replaceAll('/', '-'));
+    const start = JSON.parse(readFileSync(join(folder, `${uuids[i]}.jsonl`), 'utf8').split('\n')[0]);
+    const tags = JSON.parse(readFileSync(join(folder, `${uuids[i]}.settings.json`), 'utf8')).tags?.map((tag) => tag.name).sort() ?? [];
+    local.push({ sdkListTitle: listed?.title ?? null, sessionStartTitle: start.title, titleManuallySet: start.isSessionTitleManuallySet ?? null, tags });
+  }
+  report.localStorage = local;
+  check('sdk_lists_controller_titles', local.every((item, i) => item.sdkListTitle === expected[i]));
+  check('labels_stored_as_tags', JSON.stringify(local[0].tags) === JSON.stringify(['acceptance', 'sdk']) && JSON.stringify(local[1].tags) === JSON.stringify(['sdk']));
   check('zero_amp_contact', audit().every((m) => !m.attachesMcp && !/mcp/i.test(m.method ?? '')));
   for (const [i, id] of ids.entries()) {
     report.sessions.push({
-      controllerSession: id, runs: Object.values(state().runs).filter((r) => r.sessionId === id).map((r) => ({ runId: r.runId, state: r.state, model: r.model, autonomy: r.autonomy, reasoningEffort: r.reasoningEffort })),
+      controllerSession: id, runs: runsOf(id).map((r) => ({ runId: r.runId, state: r.state, model: r.model, autonomy: r.autonomy, reasoningEffort: r.reasoningEffort, titleSync: r.titleSync ?? null })),
       factorySession: uuids[i], factoryWebRoute: `https://app.factory.ai/sessions/${uuids[i]}`,
     });
   }

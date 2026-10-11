@@ -262,7 +262,9 @@ export class Controller {
       execArgv: [],
       env: { ...process.env, FACTORY_DROID_AUTO_UPDATE_ENABLED: 'false' },
     });
-    const entry = { child, result: null, error: null, errorCode: null, reason: null, persisted: new Map(), approvedReplySends: new Set() };
+    const title = this.pendingTitle(session);
+    const titleTimeoutMs = Math.min(10000, Math.floor(this.config.runTimeoutMs / 4));
+    const entry = { child, result: null, error: null, errorCode: null, reason: null, persisted: new Map(), approvedReplySends: new Set(), title };
     this.workers.set(run.runId, entry);
     entry.timer = setTimeout(() => this.stopWorker(run, 'timeout'), this.config.runTimeoutMs);
     child.stderr.on('data', (data) => this.message(run, { kind: 'stderr', text: data.toString() }));
@@ -298,7 +300,9 @@ export class Controller {
         if (msg.result.text) { run.preview = msg.result.text.slice(-4000); run.previewTruncated = msg.result.text.length > 4000; }
         this.changed(run); // Keep the result durable even if controller dies during cleanup.
         clearTimeout(entry.timer);
-        entry.killTimer ??= setTimeout(() => this.killGroup(child.pid), this.config.cancelGraceMs);
+        // The execution deadline ends with the result. Optional title sync then gets
+        // its own bounded window; the slot and locks stay held until close.
+        entry.killTimer ??= setTimeout(() => this.killGroup(child.pid), this.config.cancelGraceMs + (title ? titleTimeoutMs : 0));
       } else if (msg.kind === 'error') { entry.error = msg.error; entry.errorCode = msg.code ?? null; }
       else this.message(run, msg);
     });
@@ -310,6 +314,12 @@ export class Controller {
       this.killGroup(child.pid);
       this.workers.delete(run.runId);
       const result = entry.result;
+      if (result && title && !entry.reason && !run.titleSync) {
+        run.titleSync = { state: 'failed', title, error: 'Title sync did not finish before worker cleanup' };
+        run.events.push({ at: now(), type: 'title_sync_failed', message: run.titleSync.error });
+        run.events = run.events.slice(-20);
+        console.error(`Factory title sync failed for run ${run.runId}: ${run.titleSync.error}`);
+      }
       if (result) {
         if (result.sessionId !== run.droidSessionId) {
           run.state = 'failed'; run.error = 'Terminal result sessionId mismatch';
@@ -338,9 +348,9 @@ export class Controller {
     child.send({
       run: { runId: run.runId, sessionId: run.sessionId, workspace: run.workspace, autonomy: run.autonomy, model: run.model, reasoningEffort: run.reasoningEffort, droidSessionId: run.droidSessionId, replyTo: run.replyTo },
       replyHandles: this.replyHandlesFor(run),
-      factory: { title: this.pendingTitle(session), tags: session.droidSessionId ? [] : session.labels.map((name) => ({ name })) },
+      factory: { title, tags: session.droidSessionId ? [] : session.labels.map((name) => ({ name })) },
       prompt,
-      config: { droidPath: this.config.droidPath, approvedDirectories: this.config.approvedDirectories, reasoningEffort: this.config.reasoningEffort, amp: this.config.ampMcp ?? null, ackTimeoutMs: Math.min(this.config.runTimeoutMs, 30000), titleTimeoutMs: Math.min(10000, Math.floor(this.config.runTimeoutMs / 4)) },
+      config: { droidPath: this.config.droidPath, approvedDirectories: this.config.approvedDirectories, reasoningEffort: this.config.reasoningEffort, amp: this.config.ampMcp ?? null, ackTimeoutMs: Math.min(this.config.runTimeoutMs, 30000), titleTimeoutMs },
     });
   }
 

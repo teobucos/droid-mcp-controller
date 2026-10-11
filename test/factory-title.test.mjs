@@ -3,17 +3,18 @@
 // separates: never renaming (dashboard shows the auto title), renaming before the
 // first turn (the generated title would replace it), renaming on every turn,
 // an update_session that spawns Droid outside admission, a rename failure that
-// fails the turn, and title sync leaking into request-key fingerprints.
+// fails the turn or (near the deadline) times it out, and title sync leaking into
+// request-key fingerprints.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { rmSync } from 'node:fs';
+import { rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { boot, stop, call, audit, readState } from './harness.mjs';
 
 const MODEL = [{ id: 'std-model', displayName: 'Standard', supportedReasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'high' }];
 
-async function fixture(env = {}) {
-  const h = await boot({ defaultModel: 'std-model', runTimeoutMs: 8000 }, env);
+async function fixture(env = {}, extra = {}) {
+  const h = await boot({ defaultModel: 'std-model', runTimeoutMs: 8000, ...extra }, env);
   const { writeFileSync } = await import('node:fs');
   writeFileSync(join(h.dir, 'mock/catalog.json'), JSON.stringify(MODEL));
   h.create = (key, prompt, more = {}) => call(h, 'droid_create_session', { requestKey: key, workspace: join(h.dir, 'workspace'), prompt, replyTo: null, ...more });
@@ -139,3 +140,93 @@ for (const mode of ['error', 'hang']) {
     } finally { await cleanup(h); }
   });
 }
+
+// Review regression: the optional rename ran before the authoritative result was
+// delivered, while the execution deadline was still armed, so a successful turn
+// that finished near the deadline became timed_out with needsAttention.
+test('a successful turn near the deadline stays successful when the best-effort rename hangs', async (t) => {
+  // Review repro: 4000 ms deadline, 3100 ms turn. Scaled to 8000/6500 (title window
+  // 2000 ms) so host load cannot turn the successful turn itself into a real timeout.
+  const deadline = { runTimeoutMs: 8000 };
+  const resultOf = (h, runId) => JSON.parse(readFileSync(join(h.dir, 'state', `${runId}.result.json`), 'utf8'));
+
+  await t.test('titled 6500 ms turn with a hanging rename', async () => {
+    const h = await fixture({ MOCK_RENAME_FAILURE: 'hang' }, deadline);
+    try {
+      const created = await h.create('near', 'sleep:6500 near', { title: 'Near deadline' });
+      const status = await h.settle(created.metadata.session);
+      const durable = resultOf(h, created.latestRun.runId);
+      assert.equal(durable.success, true);
+      assert.equal(durable.subtype, 'success');
+      assert.equal(status.latestRun.state, 'succeeded', 'a slow optional rename must not turn a successful turn into timed_out');
+      assert.equal(status.latestRun.needsAttention, false);
+      assert.equal(status.latestRun.error, null);
+      const run = runOf(h, created.latestRun.runId);
+      assert.equal(run.titleSync.state, 'failed');
+      assert.equal(run.stopReason, undefined);
+      assert.ok(run.events.some((event) => event.type === 'title_sync_failed'));
+      assert.deepEqual(renamesIn(turnWire(h, 'sleep:6500 near')), ['Near deadline']);
+    } finally { await cleanup(h); }
+  });
+
+  await t.test('a slow but successful rename after a near-deadline turn is applied, not cut off', async () => {
+    const h = await fixture({ MOCK_RENAME_FAILURE: 'slow' }, deadline);
+    try {
+      const created = await h.create('slow', 'sleep:6500 slow', { title: 'Slow rename' });
+      const status = await h.settle(created.metadata.session);
+      assert.equal(status.latestRun.state, 'succeeded');
+      assert.deepEqual(runOf(h, created.latestRun.runId).titleSync, { state: 'applied', title: 'Slow rename' });
+    } finally { await cleanup(h); }
+  });
+
+  await t.test('control: untitled 6500 ms turn', async () => {
+    const h = await fixture({ MOCK_RENAME_FAILURE: 'hang' }, deadline);
+    try {
+      const created = await h.create('plain', 'sleep:6500 plain');
+      assert.equal((await h.settle(created.metadata.session)).latestRun.state, 'succeeded');
+      assert.deepEqual(renamesIn(turnWire(h, 'sleep:6500 plain')), []);
+    } finally { await cleanup(h); }
+  });
+
+  await t.test('control: titled 700 ms turn with a hanging rename', async () => {
+    const h = await fixture({ MOCK_RENAME_FAILURE: 'hang' }, deadline);
+    try {
+      const created = await h.create('short', 'sleep:700 short', { title: 'Short' });
+      const status = await h.settle(created.metadata.session);
+      assert.equal(status.latestRun.state, 'succeeded');
+      assert.equal(status.latestRun.needsAttention, false);
+      assert.equal(runOf(h, created.latestRun.runId).titleSync.state, 'failed');
+    } finally { await cleanup(h); }
+  });
+
+  await t.test('a genuinely overrunning titled turn still times out and is never renamed', async () => {
+    const h = await fixture({}, deadline);
+    try {
+      const created = await h.create('over', 'sleep:11000 over', { title: 'Overrun' });
+      const status = await h.settle(created.metadata.session);
+      assert.equal(status.latestRun.state, 'timed_out');
+      assert.equal(status.latestRun.needsAttention, true);
+      assert.deepEqual(renamesIn(turnWire(h, 'sleep:11000 over')), []);
+      assert.equal(runOf(h, created.latestRun.runId).titleSync, undefined);
+    } finally { await cleanup(h); }
+  });
+
+  await t.test('slot and workspace lock are held until the renaming worker has cleaned up', async () => {
+    const h = await fixture({ MOCK_RENAME_FAILURE: 'hang' }, { maxConcurrentRuns: 2 });
+    try {
+      const first = await h.create('lock-a', 'sleep:1000 lock-a', { title: 'Locked', autonomy: 'low' });
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      const second = await h.create('lock-b', 'lock-b', { autonomy: 'low' });
+      assert.equal(second.latestRun.state, 'queued', 'a writer on the same tree waits');
+      await h.settle(second.metadata.session);
+      assert.equal((await h.settle(first.metadata.session)).latestRun.state, 'succeeded');
+      const all = audit(h);
+      const firstPid = all.find((x) => x.method === 'droid.add_user_message' && x.params.text.startsWith('sleep:1000 lock-a')).mockPid;
+      const closed = all.find((x) => x.mockPid === firstPid && x.method === 'droid.close_session');
+      const renamed = all.find((x) => x.mockPid === firstPid && x.method === 'droid.rename_session');
+      const nextInit = all.find((x) => x.method === 'droid.initialize_session' && x.ts > renamed.ts && x.mockPid !== firstPid && !x.params.cwd.endsWith('/state'));
+      assert.ok(closed && renamed && nextInit);
+      assert.ok(nextInit.ts >= closed.ts, 'the queued writer starts only after the first worker closed its Droid session');
+    } finally { await cleanup(h); }
+  });
+});
