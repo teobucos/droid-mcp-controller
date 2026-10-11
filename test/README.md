@@ -98,6 +98,23 @@ changing request-key fingerprints; and labels missing from creation-time tags or
 duplicating the SDK's `sdk` tag. Four source mutations (rename every turn, fatal
 rename failure, fingerprint from the current title, no tags) each fail the suite.
 
+A later review found that the rename ran before the authoritative result was
+delivered, with the execution deadline still armed: a successful turn finishing near
+the deadline became `timed_out` with `needsAttention`. The regression case (review
+repro 4000/3100 ms; kept at 8000/6500 ms so host load cannot cause a genuine timeout)
+failed on that source and passes after the fix, with controls for an untitled turn
+and a short titled turn, a slow successful rename that must not be cut off, a genuine
+overrun that still times out without a rename, and a same-tree writer that must wait
+until the renaming worker has closed. Three mutations (rename before the result, no
+title cleanup window, deadline left armed after the result) each fail it.
+
+Many E2E cases assert short real deadlines (1.1 to 8 s). On a guest that the host
+pauses (for example a VM snapshot or fork, logged by the kernel as `crng reseeded due
+to virtual machine fork`), every process freezes and such a case can report
+`timed_out`. Before treating an intermittent timeout as a regression, run
+`node scripts/stall-probe.mjs /abs/probe.jsonl 250 & npm test`. A timer stall without
+an fsync spike at the time of the failure points to the host, not the controller.
+
 ## Session surface failure cases
 
 `test/session-surface.test.mjs` was written before the implementation. Each case names a

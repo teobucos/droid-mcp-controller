@@ -266,8 +266,11 @@ Always call the puck tool directly even in Spec mode; never call ExitSpecMode me
       }
     }
     if (!terminal) throw new Error('Stream ended without a terminal Droid result');
-    // After the turn, so Droid's generated title cannot replace it. Bounded and
-    // best-effort: the turn's outcome never depends on the dashboard title.
+    // The authoritative result goes first: it disarms the execution deadline, so a
+    // slow rename cannot turn a finished turn into timed_out. Renaming after the
+    // turn keeps Droid's generated title from replacing it; the controller bounds
+    // this cleanup window and holds the slot and locks until the worker exits.
+    await send({ kind: 'result', result: terminal });
     if (factory.title && !cancelled) {
       try {
         await withTimeout(session.rename({ title: factory.title }), config.titleTimeoutMs ?? 10000);
@@ -276,7 +279,6 @@ Always call the puck tool directly even in Spec mode; never call ExitSpecMode me
         await send({ kind: 'title', state: 'failed', title: factory.title, error: String(error?.message ?? error) }).catch(() => {});
       }
     }
-    await send({ kind: 'result', result: terminal });
   } catch (error) {
     failure = error.message;
     failureCode = error.code === undefined || !String(error.code).startsWith('amp_mcp_') ? undefined : error.code;

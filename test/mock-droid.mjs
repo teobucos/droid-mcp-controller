@@ -188,6 +188,7 @@ createInterface({ input: process.stdin }).on('line', (line) => {
       if (process.env.MOCK_RENAME_FAILURE === 'error') {
         send({ ...envelope('response'), id: req.id, error: { code: -32603, message: 'rename failure at /private/mock/.factory/x' } }); break;
       }
+      if (process.env.MOCK_RENAME_FAILURE === 'slow') { setTimeout(() => { settings = { ...settings, title: p.title }; persist(); reply(req, { success: true }); }, 700); break; }
       settings = { ...settings, title: p.title }; persist(); reply(req, { success: true }); break;
     case 'droid.close_session':
       if (process.env.MOCK_SLOW_CLOSE === '1' && !cwd.endsWith('/state')) return;

@@ -239,9 +239,14 @@ Titles and tags. A session created with an explicit `title` gets that title in F
 through SDK `rename()` after its first turn (renaming earlier would be replaced by
 Droid's generated title). A `droid_update_session` title change is applied after the
 session's next turn; the update itself never starts Droid outside admission. Sessions
-without a title keep Factory's generated title. Rename is bounded and best effort: a
-failure is logged to the controller's stderr and the run's events and retried on the
-next turn, and never changes the turn's outcome or request-key fingerprints. Labels
+without a title keep Factory's generated title. Rename is best effort and runs after
+the worker has delivered the turn's terminal result, which ends the execution deadline,
+so a slow or failed rename cannot make a finished turn time out. It then gets its own
+cleanup window of `min(10 s, runTimeoutMs / 4)` (plus `cancelGraceMs`); the execution
+slot and workspace lock stay held until the worker exits. A failure or an unfinished
+rename is logged to the controller's stderr and the run's events and retried on the
+next turn. It never changes the turn's outcome or request-key fingerprints. Turns that
+are cancelled or time out are not renamed. Labels
 are sent as Factory session tags at creation, beside the SDK's own `sdk` tag (a label
 named `sdk` merges with it). SDK 0.9.1 has no tag update call, so later label changes
 stay controller metadata. Whether the Factory web app displays these tags is unverified.
