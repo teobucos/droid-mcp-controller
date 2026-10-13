@@ -1,9 +1,9 @@
 # Droid MCP
 
-Droid MCP (`droid-mcp`) is a small, same-host MCP server that lets Puck manage Factory Droid sessions the
-way it manages Amp threads: create, message and steer, status, read, wait, find,
-update, cancel, usage, workspaces and models, with agent reply-back through the
-Amp MCP. No UI, database service, Factory daemon or account API. Installation and
+Droid MCP (`droid-mcp`) is a small, same-host MCP server that lets Echo (the operator's main assistant) manage Factory Droid
+sessions: create, message and steer, status, read, wait, find, update, cancel,
+usage, workspaces and models. Echo talks to Amp and to Droid separately; Amp and
+Droid do not talk to each other, so sessions run detached (`replyTo: null`). No UI, database service, Factory daemon or account API. Installation and
 secure connection steps are in [HANDOFF.md](HANDOFF.md); the full, generated tool
 schemas are in [docs/TOOLS.md](docs/TOOLS.md).
 
@@ -16,8 +16,8 @@ schemas are in [docs/TOOLS.md](docs/TOOLS.md).
   supported API-key setup for `droid` itself. The controller inherits that environment
   and never collects credentials.
 - Absolute, existing approved workspace roots and a private (700) state directory.
-- Optional: an authenticated HTTPS route for remote Puck access (`transport:"http"` with a
-  bearer token file), and Amp MCP OAuth on the host for agent reply-back (`ampMcp`).
+- Optional: an authenticated HTTPS route for remote access (`transport:"http"` with a
+  bearer token file). The Amp reply-back path (`ampMcp`) is not used in this setup.
 
 Docker is neither required by the source nor sufficient on its own: a container still
 needs the CLI, its Factory login, the workspaces and private state. Dependencies are

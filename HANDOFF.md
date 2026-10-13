@@ -259,55 +259,12 @@ paths. Capacity defaults to 4 (`maxConcurrentRuns`, 1 to 16) and is reported by
 [docs/CUTOVER.md](docs/CUTOVER.md); state and recovery are in
 [docs/STATE-MIGRATION.md](docs/STATE-MIGRATION.md).
 
-## 6. Optionally connect Droid back to Puck through Amp OAuth
+## 6. Droid does not talk to Amp
 
-This is separate from Puck's Bearer connection to the controller. Add private
-`"ampMcp": {}` host configuration (README.md). The endpoint is the generic
-`https://ampcode.com/mcp?profile=puck` (the only profile Amp currently accepts; any other
-`ampMcp.url` is refused at startup): it must not carry a `threadID`, and the
-old `puck: {conversationId, url?}` key is rejected at startup. Recipients are chosen per
-session with `replyTo`; no host default exists. Never place personal thread IDs, tokens
-or private MCP headers in the public repository.
-
-**Factory stores the Amp OAuth token per exact endpoint URL**, so the sign-in must be
-done once for this URL, as the service user, in Factory's private credential store. Use
-`node scripts/amp-signin.mjs --config <config> --dir <private dir>`: it drives
-`session.authenticateMcpServer({serverName:"amp-puck"})` through a throwaway
-project-level definition, writes the authorization link to a mode-600 file and delivers
-the owner's pasted callback URL to Factory's loopback listener. If the browser runs
-elsewhere, a loopback redirect refers to that browser's machine; hence the paste step.
-Do not put codes/tokens into shell arguments or logs, and back up the credential store first
-(see docs/CUTOVER.md). Successful consent must be followed by authenticated tool
-discovery (a routed session reaching `notification: accepted`), not assumed from a
-browser success page.
-
-Controller SDK injection supplies the same connection on create/resume in every
-approved cwd, so no edits to application repositories are needed. The controller's preflight verifies, before any task prompt, that
-`listTools` returns `amp-puck___puck` allowed and only `puck` usable (every other Amp tool default-denied).
-Saved disables are preserved; native tools are not restricted. Discovery/settings
-errors and cancellation submit no prompt. This is client-side model-context
-filtering, not a narrow OAuth security grant or OS isolation. The actual
-tool supports explicit `params.conversationID` and correlated `params.replyHandle`;
-the URL's threadID alone is not routing proof. Native AskUser is recorded
-(`latestRun.questions`) and declined; its terminal SDK result does not guarantee
-interruption or task completion, so check `needsAttention`.
-
-Progress is fire-and-forget. Steering uses one CHECKPOINT with recipient,
-session/run handles, marker, completed evidence, proposed action and decision needed.
-Consume a completed reply inline or read only the returned handle, at most 6 reads
-without messaging waits; never resend or fall back to latest-active/empty params.
-Without a reply, end BLOCKED with marker, decision and handle, leaving dependent work
-untouched. Call Puck directly in Spec mode, never ExitSpecMode just to message or
-guess AskUser answers. Acceptance/queued/working/silence is not approval; steering
-stays within existing authorization. Wording cannot override permission cancellation,
-and mock text pins do not establish model obedience. See README.md for the full protocol.
-
-Release a reserved execution slot only after state validation and runtime checks.
-Have Puck launch separate economical sessions with unique markers and `replyTo` set. Require
-actual agent-origin messages in the designated Puck conversation and a reply read
-back by Droid. Record handles and tools used; no application edits, admin calls
-or cloud jobs are needed. Initialize/tool-list success is not message acceptance.
-Status/result remain necessary when a task cannot send a report.
+In this setup Echo talks to Amp and Echo talks to Droid, but Amp and Droid do not
+talk to each other. Do not configure `ampMcp` or run `scripts/amp-signin.mjs`;
+launch every session with `replyTo: null` and read results through the
+controller. The reply-back code path remains in the source but is unused.
 
 ## Recovery and operational limits
 
