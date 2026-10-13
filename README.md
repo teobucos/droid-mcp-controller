@@ -408,6 +408,7 @@ Optional settings:
 | `defaultAutonomy` | Inherits `maxAutonomy` (`high` when both omitted); an explicit default cannot exceed the ceiling |
 | `defaultModel` | Unset (create then needs `model`). A standard live-catalog id used when create omits `model`; Fast variants are refused |
 | `reasoningEffort` | Unset; otherwise `off`, `none`, `dynamic`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Used when supported by the selected model, otherwise the model's live default applies |
+| `excludeModelIds` | `[]`. Exact model ids hidden from `droid_models` and refused on create/send (e.g. models the Factory dashboard lists as legacy but the runtime does not flag). Models with `deprecated:true`, `disabled:true` or a `deprecationDate` are always hidden |
 | `maxConcurrentRuns` | 4 (1 to 16); queued turns wait FIFO |
 | `runTimeoutMs` | 3600000 (one hour wall clock, including setup) |
 | `cancelGraceMs` | 5000, also bounds terminal cleanup |

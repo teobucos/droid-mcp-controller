@@ -4,7 +4,7 @@ import { ToolError } from './errors.mjs';
 
 const catalogSchema = z.array(z.object({
   id: z.string().min(1), displayName: z.string().min(1), disabled: z.boolean().optional(),
-  deprecated: z.boolean().optional(),
+  deprecated: z.boolean().optional(), deprecationDate: z.string().optional(),
   modelProvider: z.string().optional(),
   supportedReasoningEfforts: z.array(z.string()).optional(), defaultReasoningEffort: z.string().optional(),
   noImageSupport: z.boolean().optional(), supportsPDFs: z.boolean().optional(),
@@ -67,7 +67,7 @@ export class ModelCatalog {
     try {
       await transport.connect();
       await client.initializeSession({ machineId: 'default', cwd: this.config.stateDirectory, autonomyLevel: 'off', interactionMode: 'spec', disableBuiltinSkills: true });
-      const models = catalogSchema.parse(catalog).filter((model) => model.disabled !== true && model.deprecated !== true).map((model) => ({
+      const models = catalogSchema.parse(catalog).filter((model) => model.disabled !== true && model.deprecated !== true && model.deprecationDate === undefined && !this.config.excludeModelIds.includes(model.id)).map((model) => ({
         id: model.id, displayName: model.displayName,
         ...(model.deprecated !== undefined ? { deprecated: model.deprecated } : {}),
         ...(model.modelProvider !== undefined ? { provider: model.modelProvider } : {}),
