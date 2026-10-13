@@ -1,0 +1,13 @@
+{
+  "approvedDirectories": [
+    "/workspace"
+  ],
+  "stateDirectory": "/home/box/.droid-mcp-state",
+  "droidPath": "/home/box/.local/bin/droid",
+  "transport": "stdio",
+  "maxAutonomy": "high",
+  "maxConcurrentRuns": 4,
+  "defaultModel": "claude-opus-5-5",
+  "reasoningEffort": "high",
+  "excludeModelIds": []
+}

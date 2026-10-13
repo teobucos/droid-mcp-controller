@@ -1,0 +1,8 @@
+{
+  "logoAnimation": "off",
+  "model": "claude-opus-5-5",
+  "reasoningEffort": "high",
+  "sessionDefaultSettings": {
+    "autonomyLevel": "high"
+  }
+}
