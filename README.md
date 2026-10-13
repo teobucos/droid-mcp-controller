@@ -391,6 +391,24 @@ startup without rewriting. There are no automatic migrations or backfills.
 Existing current sessions, results, request keys and credentials are preserved.
 See [docs/STATE-MIGRATION.md](docs/STATE-MIGRATION.md) for requirements and recovery.
 
+## Reference host setup
+
+The setup in use (stdio, localhost only, no tunnel) matches `config.example.json`:
+`defaultModel` `claude-opus-5-5`, `reasoningEffort` `high`, `maxAutonomy` `high`,
+`maxConcurrentRuns` 4 and `excludeModelIds` `[]` (no legacy list populated; the runtime
+already hides `deprecated` models and models with a `deprecationDate`). `defaultAutonomy` is
+omitted, so it falls back to `maxAutonomy` (`high`); set it explicitly for a lower default.
+
+Register it as a stdio MCP server named `droid-mcp`:
+
+```sh
+node /absolute/path/to/droid-mcp-controller/src/server.mjs --config /absolute/path/to/config.json
+```
+
+No env vars are needed when the service user's `droid` CLI is already logged in. For steering
+sessions from the Factory dashboard, run `droid daemon --remote-control` on the same host
+(this host is registered as computer `grok-bot`).
+
 ## Configuration and security
 
 Copy `config.example.json` and replace every path with an **absolute** path.
