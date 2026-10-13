@@ -228,8 +228,10 @@ test('delayed reply: ownership excludes foreign sessions, bad handles and detach
 });
 
 for (const unrelated of [false, true]) test(`catalog: verified lifecycle metadata, initialization correlation (unrelated=${unrelated})`, async (t) => {
-  const h = await fixture(t, {}, unrelated ? { MOCK_CATALOG_UNRELATED: '1' } : {});
+  const h = await fixture(t, { excludeModelIds: ['excluded'] }, unrelated ? { MOCK_CATALOG_UNRELATED: '1' } : {});
   writeCatalog(h, [
+    { id: 'excluded', displayName: 'Excluded', deprecated: false },
+    { id: 'sunsetting', displayName: 'Sunsetting', deprecated: false, deprecationDate: '2026-09-25' },
     { id: 'enabled-old', displayName: 'Old', disabled: false, deprecated: true },
     { id: 'disabled-new', displayName: 'Disabled', disabled: true, deprecated: false },
     { id: 'current', displayName: 'A current', deprecated: false, supportsPDFs: true },
@@ -241,6 +243,7 @@ for (const unrelated of [false, true]) test(`catalog: verified lifecycle metadat
     { id: 'unknown-lifecycle', displayName: 'Z sparse' },
   ]);
   assert.deepEqual(audit(h).map((x) => x.method), ['droid.initialize_session', 'droid.close_session']);
+  await assert.rejects(call(h, 'droid_create_session', { requestKey: 'excluded', workspace: join(h.dir, 'workspace'), prompt: 'x', model: 'excluded', replyTo: null }), (e) => e.code === 'model_unavailable');
 });
 
 for (const phase of ['session', 'submission_intent']) for (const mode of ['delay', 'fail']) test(`R2: real controller ${phase} directory fsync ${mode} gates SDK submission`, async (t) => {

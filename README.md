@@ -391,6 +391,24 @@ startup without rewriting. There are no automatic migrations or backfills.
 Existing current sessions, results, request keys and credentials are preserved.
 See [docs/STATE-MIGRATION.md](docs/STATE-MIGRATION.md) for requirements and recovery.
 
+## Reference host setup
+
+The setup in use (stdio, localhost only, no tunnel) matches `config.example.json`:
+`defaultModel` `claude-opus-5-5`, `reasoningEffort` `high`, `maxAutonomy` `high`,
+`maxConcurrentRuns` 4 and `excludeModelIds` `[]` (no legacy list populated; the runtime
+already hides `deprecated` models and models with a `deprecationDate`). `defaultAutonomy` is
+omitted, so it falls back to `maxAutonomy` (`high`); set it explicitly for a lower default.
+
+Register it as a stdio MCP server named `droid-mcp`:
+
+```sh
+node /absolute/path/to/droid-mcp-controller/src/server.mjs --config /absolute/path/to/config.json
+```
+
+No env vars are needed when the service user's `droid` CLI is already logged in. For steering
+sessions from the Factory dashboard, run `droid daemon --remote-control` on the same host
+(this host is registered as computer `grok-bot`).
+
 ## Configuration and security
 
 Copy `config.example.json` and replace every path with an **absolute** path.
@@ -408,6 +426,7 @@ Optional settings:
 | `defaultAutonomy` | Inherits `maxAutonomy` (`high` when both omitted); an explicit default cannot exceed the ceiling |
 | `defaultModel` | Unset (create then needs `model`). A standard live-catalog id used when create omits `model`; Fast variants are refused |
 | `reasoningEffort` | Unset; otherwise `off`, `none`, `dynamic`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max`. Used when supported by the selected model, otherwise the model's live default applies |
+| `excludeModelIds` | `[]`. Exact model ids hidden from `droid_models` and refused on create/send (e.g. models the Factory dashboard lists as legacy but the runtime does not flag). Models with `deprecated:true`, `disabled:true` or a `deprecationDate` are always hidden |
 | `maxConcurrentRuns` | 4 (1 to 16); queued turns wait FIFO |
 | `runTimeoutMs` | 3600000 (one hour wall clock, including setup) |
 | `cancelGraceMs` | 5000, also bounds terminal cleanup |

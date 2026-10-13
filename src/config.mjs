@@ -27,6 +27,9 @@ const schema = z.object({
   maxConcurrentRuns: z.number().int().min(1).max(16).default(4),
   runTimeoutMs: z.number().int().min(1000).max(86400000).default(3600000),
   cancelGraceMs: z.number().int().min(100).max(30000).default(5000),
+  // Hide models from droid_models and refuse them on create/send (e.g. ones the Factory
+  // dashboard calls legacy but the runtime does not flag). Exact ids.
+  excludeModelIds: z.array(z.string().min(1)).default([]),
   modelCacheTtlMs: z.number().int().min(5000).max(600000).default(60000),
   // Reply-back is opt-in. The endpoint is generic: it names no thread and no
   // recipient. Recipients are chosen per session (replyTo) and never defaulted.
